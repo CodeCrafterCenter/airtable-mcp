@@ -10,10 +10,6 @@ const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
 const ENABLE_SCHEMA_WRITES = process.env.ENABLE_SCHEMA_WRITES === "true";
 const ENABLE_COMMENTS = process.env.ENABLE_COMMENTS === "true";
 
-// Optional feature flags — disabled by default, enable via Railway env vars
-const ENABLE_SCHEMA_WRITES = process.env.ENABLE_SCHEMA_WRITES === "true";
-const ENABLE_COMMENTS = process.env.ENABLE_COMMENTS === "true";
-
 if (!AIRTABLE_API_KEY) throw new Error("Missing AIRTABLE_API_KEY");
 if (!AIRTABLE_BASE_ID) throw new Error("Missing AIRTABLE_BASE_ID");
 
