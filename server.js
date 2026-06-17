@@ -10,6 +10,10 @@ const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
 const ENABLE_SCHEMA_WRITES = process.env.ENABLE_SCHEMA_WRITES === "true";
 const ENABLE_COMMENTS = process.env.ENABLE_COMMENTS === "true";
 
+// Optional feature flags — disabled by default, enable via Railway env vars
+const ENABLE_SCHEMA_WRITES = process.env.ENABLE_SCHEMA_WRITES === "true";
+const ENABLE_COMMENTS = process.env.ENABLE_COMMENTS === "true";
+
 if (!AIRTABLE_API_KEY) throw new Error("Missing AIRTABLE_API_KEY");
 if (!AIRTABLE_BASE_ID) throw new Error("Missing AIRTABLE_BASE_ID");
 
@@ -199,51 +203,105 @@ async function validateFields(tableName, fields, { requireAll = true } = {}) {
   return { table, missing, valid: requested.filter((fieldName) => existing.has(fieldName)) };
 }
 
-async function selectRecords(tableName, options) {
-  const records = await base(tableName).select(options).all();
-  return normalizeRecords(records);
-}
-
-async function createRecords(tableName, records) {
-  await validateFields(tableName, records.flatMap((record) => Object.keys(record.fields)));
-  const created = await base(tableName).create(records);
-  return normalizeRecords(created);
-}
-
-async function updateRecords(tableName, records) {
-  await validateFields(tableName, records.flatMap((record) => Object.keys(record.fields)));
-  const updated = await base(tableName).update(records);
-  return normalizeRecords(updated);
-}
-
-function buildSearchFormula(searchFields, query) {
-  const safeQuery = escapeFormulaString(query).toLowerCase();
-  const clauses = searchFields.map((fieldName) => {
-    const safeField = escapeFieldName(fieldName);
-    return `FIND("${safeQuery}", LOWER({${safeField}} & ""))`;
-  });
-  return clauses.length === 1 ? clauses[0] : `OR(${clauses.join(", ")})`;
-}
-
-function scoreRecord(record, searchFields, query, exactFields = []) {
-  const normalizedQuery = String(query ?? "").trim().toLowerCase();
-  let score = 0;
-  const matchedFields = [];
-
-  for (const fieldName of searchFields) {
-    const value = String(record.fields[fieldName] ?? "").trim().toLowerCase();
-    if (!value || !normalizedQuery) continue;
-    if (value === normalizedQuery) {
-      score += exactFields.includes(fieldName) ? 100 : 80;
-      matchedFields.push({ fieldName, match: "exact" });
-    } else if (value.includes(normalizedQuery)) {
-      score += 40;
-      matchedFields.push({ fieldName, match: "contains" });
-    }
+/**
+ * Resolve a record ID from either a bare record ID string or a field-value
+ * lookup. Accepts:
+ *   - { recordId: "recXXX" }
+ *   - { tableName, lookupField, lookupValue }
+ */
+async function resolveRecordId({ tableName, recordId, lookupField, lookupValue }) {
+  if (recordId) return recordId;
+  if (!tableName || !lookupField || lookupValue === undefined) {
+    throw new Error(
+      "Provide either recordId or all of: tableName, lookupField, lookupValue"
+    );
   }
-
-  return { ...record, match: { score, matchedFields } };
+  const safeValue = String(lookupValue).replace(/"/g, '\\"');
+  const formula = `{${lookupField}} = "${safeValue}"`;
+  const records = await base(tableName).select({ filterByFormula: formula, maxRecords: 1 }).all();
+  if (!records.length) {
+    throw new Error(
+      `No record found in "${tableName}" where ${lookupField} = "${lookupValue}"`
+    );
+  }
+  return records[0].id;
 }
+
+/**
+ * Validate that every key in `fields` exists in the table schema.
+ * Unknown fields are returned as a warning list rather than a hard error so
+ * callers can decide how to handle them.
+ */
+async function validateFields(tableName, fields) {
+  const tables = await getTables();
+  const table = tables.find((t) => t.name === tableName);
+  if (!table) return { valid: true, unknownFields: [] };
+
+  const knownNames = new Set((table.fields ?? []).map((f) => f.name));
+  const unknownFields = Object.keys(fields).filter((k) => !knownNames.has(k));
+  return { valid: unknownFields.length === 0, unknownFields };
+}
+
+function normalizeRecords(records) {
+  return records.map((record) => ({
+    id: record.id,
+    fields: record.fields
+  }));
+}
+
+/** Wrap a tool handler so errors always return a structured MCP error response. */
+function safeHandler(fn) {
+  return async (args) => {
+    try {
+      return await fn(args);
+    } catch (err) {
+      const message = err?.message ?? String(err);
+      console.error("[airtable-mcp] tool error:", message);
+      return {
+        isError: true,
+        content: [{ type: "text", text: JSON.stringify({ error: message }, null, 2) }]
+      };
+    }
+  };
+}
+
+const mcpServer = new McpServer({
+  name: "airtable-mcp",
+  version: "6.0.0"
+});
+
+/* ---------------- CAPABILITY REPORT ---------------- */
+
+mcpServer.tool(
+  "get_capabilities",
+  "Report which optional features are enabled on this MCP server",
+  {},
+  safeHandler(async () => {
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify(
+          {
+            schemaWrites: ENABLE_SCHEMA_WRITES,
+            comments: ENABLE_COMMENTS,
+            version: "6.0.0"
+          },
+          null,
+          2
+        )
+      }]
+    };
+  })
+);
+
+/* ---------------- TABLES / SCHEMA ---------------- */
+
+mcpServer.tool(
+  "list_tables",
+  "List all tables in the Airtable base",
+  {},
+  safeHandler(async () => {
+    const tables = await getTables();
 
 function summarizeResolution(scoredRecords) {
   const sorted = [...scoredRecords].sort((a, b) => b.match.score - a.match.score);
@@ -257,7 +315,8 @@ function summarizeResolution(scoredRecords) {
       human_review_required: false,
       duplicate_risk: false
     };
-  }
+  })
+);
 
   if (top.match.score >= 100 && (!second || second.match.score < 80)) {
     return {
@@ -332,8 +391,11 @@ tool("list_tables", "List all tables in the Airtable base", {}, async () => {
 tool(
   "get_table_schema",
   "Get schema for one table or all tables in the Airtable base",
-  { tableName: z.string().optional(), forceRefresh: z.boolean().optional() },
-  async ({ tableName, forceRefresh = false }) => {
+  {
+    tableName: z.string().optional(),
+    forceRefresh: z.boolean().optional()
+  },
+  safeHandler(async ({ tableName, forceRefresh = false }) => {
     const tables = await getTables({ forceRefresh });
 
     if (tableName) {
@@ -342,8 +404,27 @@ tool(
       return success("get_table_schema", compactTable(table));
     }
 
-    return success("get_table_schema", tables.map(compactTable));
-  }
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify(
+          tables.map((t) => ({
+            id: t.id,
+            name: t.name,
+            description: t.description ?? null,
+            fields: (t.fields ?? []).map((f) => ({
+              id: f.id,
+              name: f.name,
+              type: f.type,
+              description: f.description ?? null
+            }))
+          })),
+          null,
+          2
+        )
+      }]
+    };
+  })
 );
 
 /* ---------------- RECORD READ ---------------- */
@@ -351,23 +432,64 @@ tool(
 tool(
   "list_records",
   "List records from an Airtable table",
-  { tableName: z.string(), maxRecords: z.number().int().min(1).max(100).optional() },
-  async ({ tableName, maxRecords = 20 }) => {
-    await getTableOrThrow(tableName);
-    const records = await selectRecords(tableName, { maxRecords });
-    return success("list_records", records);
-  }
+  {
+    tableName: z.string(),
+    maxRecords: z.number().int().min(1).max(100).optional()
+  },
+  safeHandler(async ({ tableName, maxRecords = 20 }) => {
+    const records = await base(tableName).select({ maxRecords }).all();
+
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify(normalizeRecords(records), null, 2)
+      }]
+    };
+  })
 );
 
 tool(
   "get_record",
   "Get one Airtable record by record ID",
-  { tableName: z.string(), recordId: z.string() },
-  async ({ tableName, recordId }) => {
-    await getTableOrThrow(tableName);
+  {
+    tableName: z.string(),
+    recordId: z.string()
+  },
+  safeHandler(async ({ tableName, recordId }) => {
     const record = await base(tableName).find(recordId);
-    return success("get_record", { id: record.id, fields: record.fields });
-  }
+
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify(
+          { id: record.id, fields: record.fields },
+          null,
+          2
+        )
+      }]
+    };
+  })
+);
+
+mcpServer.tool(
+  "resolve_record",
+  "Resolve a record ID by looking up a field value, or confirm an existing record ID",
+  {
+    tableName: z.string(),
+    recordId: z.string().optional(),
+    lookupField: z.string().optional(),
+    lookupValue: z.string().optional()
+  },
+  safeHandler(async ({ tableName, recordId, lookupField, lookupValue }) => {
+    const id = await resolveRecordId({ tableName, recordId, lookupField, lookupValue });
+    const record = await base(tableName).find(id);
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({ id: record.id, fields: record.fields }, null, 2)
+      }]
+    };
+  })
 );
 
 tool(
@@ -379,12 +501,24 @@ tool(
     query: z.string(),
     maxRecords: z.number().int().min(1).max(100).optional()
   },
-  async ({ tableName, fieldName, query, maxRecords = 20 }) => {
-    await validateFields(tableName, [fieldName]);
-    const formula = buildSearchFormula([fieldName], query);
-    const records = await selectRecords(tableName, { filterByFormula: formula, maxRecords });
-    return success("search_records", records, { formula });
-  }
+  safeHandler(async ({ tableName, fieldName, query, maxRecords = 20 }) => {
+    const safeQuery = query.replace(/"/g, '\\"');
+    const formula = `FIND(LOWER("${safeQuery}"), LOWER({${fieldName}}))`;
+
+    const records = await base(tableName)
+      .select({
+        filterByFormula: formula,
+        maxRecords
+      })
+      .all();
+
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify(normalizeRecords(records), null, 2)
+      }]
+    };
+  })
 );
 
 tool(
@@ -396,7 +530,10 @@ tool(
     query: z.string(),
     maxPerTable: z.number().int().min(1).max(50).optional()
   },
-  async ({ tableNames, fieldName, query, maxPerTable = 10 }) => {
+  safeHandler(async ({ tableNames, fieldName, query, maxPerTable = 10 }) => {
+    const safeQuery = query.replace(/"/g, '\\"');
+    const formula = `FIND(LOWER("${safeQuery}"), LOWER({${fieldName}}))`;
+
     const results = [];
 
     for (const tableName of tableNames) {
@@ -409,38 +546,13 @@ tool(
       results.push({ tableName, records, formula });
     }
 
-    return success("find_records_across_tables", results);
-  }
-);
-
-tool(
-  "resolve_record",
-  "Resolve the best matching record and identify duplicate risk before writing",
-  {
-    tableName: z.string(),
-    query: z.string(),
-    searchFields: z.array(z.string()).min(1).max(10),
-    exactFields: z.array(z.string()).optional(),
-    maxRecords: z.number().int().min(1).max(50).optional()
-  },
-  async ({ tableName, query, searchFields, exactFields = [], maxRecords = 20 }) => {
-    await validateFields(tableName, searchFields);
-    const formula = buildSearchFormula(searchFields, query);
-    const records = await selectRecords(tableName, { filterByFormula: formula, maxRecords });
-    const scoredRecords = records.map((record) =>
-      scoreRecord(record, searchFields, query, exactFields)
-    );
-    const resolution = summarizeResolution(scoredRecords);
-
-    return success("resolve_record", {
-      tableName,
-      query,
-      searchFields,
-      formula,
-      resolution,
-      records: scoredRecords.sort((a, b) => b.match.score - a.match.score)
-    });
-  }
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify(results, null, 2)
+      }]
+    };
+  })
 );
 
 /* ---------------- RECORD WRITE ---------------- */
@@ -448,21 +560,53 @@ tool(
 tool(
   "create_record",
   "Create one Airtable record",
-  { tableName: z.string(), fields: z.record(z.any()) },
-  async ({ tableName, fields }) => {
-    const created = await createRecords(tableName, [{ fields }]);
-    return success("create_record", created);
-  }
+  {
+    tableName: z.string(),
+    fields: z.record(z.any())
+  },
+  safeHandler(async ({ tableName, fields }) => {
+    const { unknownFields } = await validateFields(tableName, fields);
+    const created = await base(tableName).create([{ fields }]);
+    const result = normalizeRecords(created);
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify(
+          unknownFields.length ? { records: result, warnings: { unknownFields } } : result,
+          null,
+          2
+        )
+      }]
+    };
+  })
 );
 
 tool(
   "update_record",
   "Update one Airtable record",
-  { tableName: z.string(), recordId: z.string(), fields: z.record(z.any()) },
-  async ({ tableName, recordId, fields }) => {
-    const updated = await updateRecords(tableName, [{ id: recordId, fields }]);
-    return success("update_record", updated);
-  }
+  {
+    tableName: z.string(),
+    recordId: z.string().optional(),
+    lookupField: z.string().optional(),
+    lookupValue: z.string().optional(),
+    fields: z.record(z.any())
+  },
+  safeHandler(async ({ tableName, recordId, lookupField, lookupValue, fields }) => {
+    const id = await resolveRecordId({ tableName, recordId, lookupField, lookupValue });
+    const { unknownFields } = await validateFields(tableName, fields);
+    const updated = await base(tableName).update([{ id, fields }]);
+    const result = normalizeRecords(updated);
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify(
+          unknownFields.length ? { records: result, warnings: { unknownFields } } : result,
+          null,
+          2
+        )
+      }]
+    };
+  })
 );
 
 tool(
@@ -481,56 +625,20 @@ tool(
   "Idempotently update one Airtable record by a unique field, or create it if missing",
   {
     tableName: z.string(),
-    keyFieldName: z.string(),
-    keyValue: z.string(),
-    fields: z.record(z.any()),
-    createIfMissing: z.boolean().optional(),
-    humanReviewOnMultiple: z.boolean().optional()
+    recordId: z.string().optional(),
+    lookupField: z.string().optional(),
+    lookupValue: z.string().optional()
   },
-  async ({
-    tableName,
-    keyFieldName,
-    keyValue,
-    fields,
-    createIfMissing = true,
-    humanReviewOnMultiple = true
-  }) => {
-    await validateFields(tableName, [keyFieldName, ...Object.keys(fields)]);
-    const formula = `{${escapeFieldName(keyFieldName)}} = "${escapeFormulaString(keyValue)}"`;
-    const matches = await selectRecords(tableName, { filterByFormula: formula, maxRecords: 10 });
-
-    if (matches.length > 1 && humanReviewOnMultiple) {
-      return jsonContent({
-        success: false,
-        action_attempted: "upsert_record_by_field",
-        recoverable: true,
-        human_review_required: true,
-        duplicate_risk: true,
-        safe_fallback: "Multiple records match the idempotency key. Resolve duplicates before writing.",
-        data: { tableName, keyFieldName, keyValue, matches }
-      });
-    }
-
-    if (matches.length === 1) {
-      const updated = await updateRecords(tableName, [{ id: matches[0].id, fields }]);
-      return success("upsert_record_by_field", { mode: "updated", records: updated });
-    }
-
-    if (!createIfMissing) {
-      return jsonContent({
-        success: false,
-        action_attempted: "upsert_record_by_field",
-        recoverable: true,
-        safe_fallback: "No matching record was found and createIfMissing is false.",
-        data: { tableName, keyFieldName, keyValue }
-      });
-    }
-
-    const created = await createRecords(tableName, [
-      { fields: { ...fields, [keyFieldName]: keyValue } }
-    ]);
-    return success("upsert_record_by_field", { mode: "created", records: created });
-  }
+  safeHandler(async ({ tableName, recordId, lookupField, lookupValue }) => {
+    const id = await resolveRecordId({ tableName, recordId, lookupField, lookupValue });
+    const deleted = await base(tableName).destroy([id]);
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify(deleted, null, 2)
+      }]
+    };
+  })
 );
 
 /* ---------------- BATCH WRITE ---------------- */
@@ -538,14 +646,21 @@ tool(
 tool(
   "batch_create_records",
   "Create multiple Airtable records",
-  { tableName: z.string(), records: z.array(z.record(z.any())).min(1).max(10) },
-  async ({ tableName, records }) => {
-    const created = await createRecords(
-      tableName,
+  {
+    tableName: z.string(),
+    records: z.array(z.record(z.any())).min(1).max(10)
+  },
+  safeHandler(async ({ tableName, records }) => {
+    const created = await base(tableName).create(
       records.map((fields) => ({ fields }))
     );
-    return success("batch_create_records", created);
-  }
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify(normalizeRecords(created), null, 2)
+      }]
+    };
+  })
 );
 
 tool(
@@ -558,29 +673,43 @@ tool(
       .min(1)
       .max(10)
   },
-  async ({ tableName, records }) => {
-    const updated = await updateRecords(
-      tableName,
-      records.map(({ recordId, fields }) => ({ id: recordId, fields }))
+  safeHandler(async ({ tableName, records }) => {
+    const updated = await base(tableName).update(
+      records.map(({ recordId, fields }) => ({
+        id: recordId,
+        fields
+      }))
     );
-    return success("batch_update_records", updated);
-  }
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify(normalizeRecords(updated), null, 2)
+      }]
+    };
+  })
 );
 
 tool(
   "batch_delete_records",
   "Delete multiple Airtable records",
-  { tableName: z.string(), recordIds: z.array(z.string()).min(1).max(10) },
-  async ({ tableName, recordIds }) => {
-    await getTableOrThrow(tableName);
+  {
+    tableName: z.string(),
+    recordIds: z.array(z.string()).min(1).max(10)
+  },
+  safeHandler(async ({ tableName, recordIds }) => {
     const deleted = await base(tableName).destroy(recordIds);
-    return success("batch_delete_records", deleted);
-  }
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify(deleted, null, 2)
+      }]
+    };
+  })
 );
 
 tool(
   "batch_upsert_records",
-  "Upsert multiple Airtable records by record ID when present, otherwise create them",
+  "Idempotent upsert: update records that have a recordId, create those that do not",
   {
     tableName: z.string(),
     records: z
@@ -588,9 +717,10 @@ tool(
       .min(1)
       .max(10)
   },
-  async ({ tableName, records }) => {
-    const toCreate = records.filter((record) => !record.recordId);
-    const toUpdate = records.filter((record) => record.recordId);
+  safeHandler(async ({ tableName, records }) => {
+    const toCreate = records.filter((r) => !r.recordId);
+    const toUpdate = records.filter((r) => !!r.recordId);
+
     const result = { created: [], updated: [] };
 
     if (toCreate.length) {
@@ -607,41 +737,64 @@ tool(
       );
     }
 
-    return success("batch_upsert_records", result);
-  }
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify(result, null, 2)
+      }]
+    };
+  })
 );
 
 /* ---------------- COMMENTS ---------------- */
 
 tool(
   "list_record_comments",
-  "List comments on an Airtable record",
-  { recordId: z.string() },
-  async ({ recordId }) => {
+  "List comments on an Airtable record (requires ENABLE_COMMENTS=true)",
+  {
+    tableName: z.string(),
+    recordId: z.string()
+  },
+  safeHandler(async ({ tableName, recordId }) => {
     if (!ENABLE_COMMENTS) {
-      throw new Error("Comment endpoints are disabled. Set ENABLE_COMMENTS=true after verifying Airtable comment API access.");
+      throw new Error(
+        "Comments are disabled. Set ENABLE_COMMENTS=true in Railway environment variables to enable this feature."
+      );
     }
-
-    const data = await airtableFetch(`/${AIRTABLE_BASE_ID}/${recordId}/comments`);
-    return success("list_record_comments", data);
-  }
+    const data = await airtableMetaFetch(
+      `/bases/${AIRTABLE_BASE_ID}/tables/${tableName}/records/${recordId}/comments`
+    );
+    return {
+      content: [{ type: "text", text: JSON.stringify(data, null, 2) }]
+    };
+  })
 );
 
 tool(
   "create_record_comment",
-  "Create a comment on an Airtable record",
-  { recordId: z.string(), text: z.string() },
-  async ({ recordId, text }) => {
+  "Create a comment on an Airtable record (requires ENABLE_COMMENTS=true)",
+  {
+    tableName: z.string(),
+    recordId: z.string(),
+    text: z.string()
+  },
+  safeHandler(async ({ tableName, recordId, text }) => {
     if (!ENABLE_COMMENTS) {
-      throw new Error("Comment endpoints are disabled. Set ENABLE_COMMENTS=true after verifying Airtable comment API access.");
+      throw new Error(
+        "Comments are disabled. Set ENABLE_COMMENTS=true in Railway environment variables to enable this feature."
+      );
     }
-
-    const data = await airtableFetch(`/${AIRTABLE_BASE_ID}/${recordId}/comments`, {
-      method: "POST",
-      body: JSON.stringify({ text })
-    });
-    return success("create_record_comment", data);
-  }
+    const data = await airtableMetaFetch(
+      `/bases/${AIRTABLE_BASE_ID}/tables/${tableName}/records/${recordId}/comments`,
+      {
+        method: "POST",
+        body: JSON.stringify({ text })
+      }
+    );
+    return {
+      content: [{ type: "text", text: JSON.stringify(data, null, 2) }]
+    };
+  })
 );
 
 /* ---------------- SCHEMA WRITE ---------------- */
@@ -654,48 +807,77 @@ function requireSchemaWrites() {
 
 tool(
   "create_table",
-  "Create a new Airtable table",
+  "Create a new Airtable table (requires ENABLE_SCHEMA_WRITES=true)",
   {
     tableName: z.string(),
     fields: z.array(z.object({ name: z.string(), type: z.string() })).min(1)
   },
-  async ({ tableName, fields }) => {
-    requireSchemaWrites();
+  safeHandler(async ({ tableName, fields }) => {
+    if (!ENABLE_SCHEMA_WRITES) {
+      throw new Error(
+        "Schema writes are disabled. Set ENABLE_SCHEMA_WRITES=true in Railway environment variables to enable this feature."
+      );
+    }
     const data = await airtableMetaFetch(`/bases/${AIRTABLE_BASE_ID}/tables`, {
       method: "POST",
       body: JSON.stringify({ name: tableName, fields })
     });
     schemaCache.fetchedAt = 0;
-    return success("create_table", data);
-  }
+
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify(data, null, 2)
+      }]
+    };
+  })
 );
 
-tool(
+
+mcpServer.tool(
   "create_field",
-  "Create a field in an Airtable table",
-  { tableId: z.string(), fieldName: z.string(), fieldType: z.string() },
-  async ({ tableId, fieldName, fieldType }) => {
-    requireSchemaWrites();
+  "Create a field in an Airtable table (requires ENABLE_SCHEMA_WRITES=true)",
+  {
+    tableId: z.string(),
+    fieldName: z.string(),
+    fieldType: z.string()
+  },
+  safeHandler(async ({ tableId, fieldName, fieldType }) => {
+    if (!ENABLE_SCHEMA_WRITES) {
+      throw new Error(
+        "Schema writes are disabled. Set ENABLE_SCHEMA_WRITES=true in Railway environment variables to enable this feature."
+      );
+    }
     const data = await airtableMetaFetch(`/bases/${AIRTABLE_BASE_ID}/tables/${tableId}/fields`, {
       method: "POST",
       body: JSON.stringify({ name: fieldName, type: fieldType })
     });
     schemaCache.fetchedAt = 0;
-    return success("create_field", data);
-  }
+
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify(data, null, 2)
+      }]
+    };
+  })
 );
 
 tool(
   "update_field",
-  "Update an Airtable field",
+  "Update an Airtable field (requires ENABLE_SCHEMA_WRITES=true)",
   {
     tableId: z.string(),
     fieldId: z.string(),
     name: z.string().optional(),
     description: z.string().optional()
   },
-  async ({ tableId, fieldId, name, description }) => {
-    requireSchemaWrites();
+  safeHandler(async ({ tableId, fieldId, name, description }) => {
+    if (!ENABLE_SCHEMA_WRITES) {
+      throw new Error(
+        "Schema writes are disabled. Set ENABLE_SCHEMA_WRITES=true in Railway environment variables to enable this feature."
+      );
+    }
     const body = {};
     if (name !== undefined) body.name = name;
     if (description !== undefined) body.description = description;
@@ -705,8 +887,14 @@ tool(
       body: JSON.stringify(body)
     });
     schemaCache.fetchedAt = 0;
-    return success("update_field", data);
-  }
+
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify(data, null, 2)
+      }]
+    };
+  })
 );
 
 /* ---------------- ATTACHMENTS BY URL ---------------- */
@@ -721,16 +909,21 @@ tool(
     fileUrl: z.string().url(),
     filename: z.string().optional()
   },
-  async ({ tableName, recordId, attachmentFieldName, fileUrl, filename }) => {
-    await validateFields(tableName, [attachmentFieldName]);
-    const attachment = filename ? { url: fileUrl, filename } : { url: fileUrl };
-    const updated = await updateRecords(tableName, [
-      { id: recordId, fields: { [attachmentFieldName]: [attachment] } }
-    ]);
-    return success("attach_file_to_record", updated, {
-      warning: "This replaces the existing attachment field value. Prefer append_attachment_to_record when preserving evidence."
-    });
-  }
+  safeHandler(async ({ tableName, recordId, attachmentFieldName, fileUrl, filename }) => {
+    const fields = {
+      [attachmentFieldName]: [
+        filename ? { url: fileUrl, filename } : { url: fileUrl }
+      ]
+    };
+
+    const updated = await base(tableName).update([{ id: recordId, fields }]);
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify(normalizeRecords(updated), null, 2)
+      }]
+    };
+  })
 );
 
 tool(
@@ -743,19 +936,25 @@ tool(
     fileUrl: z.string().url(),
     filename: z.string().optional()
   },
-  async ({ tableName, recordId, attachmentFieldName, fileUrl, filename }) => {
-    await validateFields(tableName, [attachmentFieldName]);
+  safeHandler(async ({ tableName, recordId, attachmentFieldName, fileUrl, filename }) => {
     const record = await base(tableName).find(recordId);
     const existing = Array.isArray(record.fields[attachmentFieldName])
       ? record.fields[attachmentFieldName]
       : [];
     const newAttachment = filename ? { url: fileUrl, filename } : { url: fileUrl };
 
-    const updated = await updateRecords(tableName, [
-      { id: recordId, fields: { [attachmentFieldName]: [...existing, newAttachment] } }
-    ]);
-    return success("append_attachment_to_record", updated);
-  }
+    const fields = {
+      [attachmentFieldName]: [...existing, newAttachment]
+    };
+
+    const updated = await base(tableName).update([{ id: recordId, fields }]);
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify(normalizeRecords(updated), null, 2)
+      }]
+    };
+  })
 );
 
 /* ---------------- HTTP SERVER ---------------- */
@@ -767,19 +966,23 @@ app.get("/", (_req, res) => {
   res.json({
     ok: true,
     name: "airtable-mcp",
-    version: "5.1.0",
-    message: "Airtable MCP server is running"
+    version: "6.0.0",
+    message: "Airtable MCP server is running",
+    capabilities: {
+      schemaWrites: ENABLE_SCHEMA_WRITES,
+      comments: ENABLE_COMMENTS
+    }
   });
 });
 
 app.get("/health", (_req, res) => {
   res.json({
     ok: true,
+    version: "6.0.0",
     schemaCacheAgeMs: schemaCache.tables ? Date.now() - schemaCache.fetchedAt : null,
     capabilities: {
-      schemaWritesEnabled: ENABLE_SCHEMA_WRITES,
-      commentsEnabled: ENABLE_COMMENTS,
-      binaryUploadsEnabled: false
+      schemaWrites: ENABLE_SCHEMA_WRITES,
+      comments: ENABLE_COMMENTS
     }
   });
 });
@@ -806,5 +1009,7 @@ app.post("/mcp", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Airtable MCP listening on port ${PORT}`);
+  console.log(`Airtable MCP v6.0.0 listening on port ${PORT}`);
+  console.log(`  Schema writes: ${ENABLE_SCHEMA_WRITES ? "ENABLED" : "disabled"}`);
+  console.log(`  Comments:      ${ENABLE_COMMENTS ? "ENABLED" : "disabled"}`);
 });
