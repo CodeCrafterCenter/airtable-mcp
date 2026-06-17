@@ -19,7 +19,7 @@ const SCHEMA_CACHE_TTL_MS = 5 * 60 * 1000;
 
 let schemaCache = { fetchedAt: 0, tables: null };
 
-const mcpServer = new McpServer({ name: "airtable-mcp", version: "5.1.0" });
+const mcpServer = new McpServer({ name: "airtable-mcp", version: "6.0.0" });
 
 function jsonContent(payload) {
   return {
@@ -186,17 +186,15 @@ async function getTableOrThrow(tableName, options = {}) {
   return table;
 }
 
-async function validateFields(tableName, fields, { requireAll = true } = {}) {
-  const table = await getTableOrThrow(tableName);
-  const existing = new Set((table.fields ?? []).map((field) => field.name));
-  const requested = Array.isArray(fields) ? fields : Object.keys(fields ?? {});
-  const missing = requested.filter((fieldName) => !existing.has(fieldName));
+async function validateFields(tableName, fields) {
+  const tables = await getTables();
+  const table = tables.find((t) => t.name === tableName);
+  if (!table) return { valid: true, unknownFields: [] };
 
-  if (requireAll && missing.length) {
-    throw new Error(`Field(s) not found in ${tableName}: ${missing.join(", ")}`);
-  }
-
-  return { table, missing, valid: requested.filter((fieldName) => existing.has(fieldName)) };
+  const knownNames = new Set((table.fields ?? []).map((f) => f.name));
+  const keys = Array.isArray(fields) ? fields : Object.keys(fields ?? {});
+  const unknownFields = keys.filter((k) => !knownNames.has(k));
+  return { valid: unknownFields.length === 0, unknownFields };
 }
 
 /**
@@ -223,28 +221,6 @@ async function resolveRecordId({ tableName, recordId, lookupField, lookupValue }
   return records[0].id;
 }
 
-/**
- * Validate that every key in `fields` exists in the table schema.
- * Unknown fields are returned as a warning list rather than a hard error so
- * callers can decide how to handle them.
- */
-async function validateFields(tableName, fields) {
-  const tables = await getTables();
-  const table = tables.find((t) => t.name === tableName);
-  if (!table) return { valid: true, unknownFields: [] };
-
-  const knownNames = new Set((table.fields ?? []).map((f) => f.name));
-  const unknownFields = Object.keys(fields).filter((k) => !knownNames.has(k));
-  return { valid: unknownFields.length === 0, unknownFields };
-}
-
-function normalizeRecords(records) {
-  return records.map((record) => ({
-    id: record.id,
-    fields: record.fields
-  }));
-}
-
 /** Wrap a tool handler so errors always return a structured MCP error response. */
 function safeHandler(fn) {
   return async (args) => {
@@ -258,85 +234,6 @@ function safeHandler(fn) {
         content: [{ type: "text", text: JSON.stringify({ error: message }, null, 2) }]
       };
     }
-  };
-}
-
-const mcpServer = new McpServer({
-  name: "airtable-mcp",
-  version: "6.0.0"
-});
-
-/* ---------------- CAPABILITY REPORT ---------------- */
-
-mcpServer.tool(
-  "get_capabilities",
-  "Report which optional features are enabled on this MCP server",
-  {},
-  safeHandler(async () => {
-    return {
-      content: [{
-        type: "text",
-        text: JSON.stringify(
-          {
-            schemaWrites: ENABLE_SCHEMA_WRITES,
-            comments: ENABLE_COMMENTS,
-            version: "6.0.0"
-          },
-          null,
-          2
-        )
-      }]
-    };
-  })
-);
-
-/* ---------------- TABLES / SCHEMA ---------------- */
-
-mcpServer.tool(
-  "list_tables",
-  "List all tables in the Airtable base",
-  {},
-  safeHandler(async () => {
-    const tables = await getTables();
-
-function summarizeResolution(scoredRecords) {
-  const sorted = [...scoredRecords].sort((a, b) => b.match.score - a.match.score);
-  const top = sorted[0] ?? null;
-  const second = sorted[1] ?? null;
-
-  if (!top) {
-    return {
-      status: "create_new_safe",
-      confidence: 0,
-      human_review_required: false,
-      duplicate_risk: false
-    };
-  })
-);
-
-  if (top.match.score >= 100 && (!second || second.match.score < 80)) {
-    return {
-      status: "exact_match",
-      confidence: top.match.score,
-      human_review_required: false,
-      duplicate_risk: false
-    };
-  }
-
-  if (top.match.score >= 40 && (!second || top.match.score - second.match.score >= 30)) {
-    return {
-      status: "likely_match",
-      confidence: top.match.score,
-      human_review_required: false,
-      duplicate_risk: false
-    };
-  }
-
-  return {
-    status: "human_review_required",
-    confidence: top.match.score,
-    human_review_required: true,
-    duplicate_risk: sorted.length > 1
   };
 }
 
@@ -533,13 +430,10 @@ tool(
     const results = [];
 
     for (const tableName of tableNames) {
-      await validateFields(tableName, [fieldName]);
-      const formula = buildSearchFormula([fieldName], query);
-      const records = await selectRecords(tableName, {
-        filterByFormula: formula,
-        maxRecords: maxPerTable
-      });
-      results.push({ tableName, records, formula });
+      const records = await base(tableName)
+        .select({ filterByFormula: formula, maxRecords: maxPerTable })
+        .all();
+      results.push({ tableName, records: normalizeRecords(records), formula });
     }
 
     return {
@@ -720,17 +614,17 @@ tool(
     const result = { created: [], updated: [] };
 
     if (toCreate.length) {
-      result.created = await createRecords(
-        tableName,
+      const created = await base(tableName).create(
         toCreate.map((record) => ({ fields: record.fields }))
       );
+      result.created = normalizeRecords(created);
     }
 
     if (toUpdate.length) {
-      result.updated = await updateRecords(
-        tableName,
+      const updated = await base(tableName).update(
         toUpdate.map((record) => ({ id: record.recordId, fields: record.fields }))
       );
+      result.updated = normalizeRecords(updated);
     }
 
     return {
