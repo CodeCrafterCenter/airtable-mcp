@@ -8,6 +8,10 @@ const PORT = process.env.PORT || 3000;
 const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
 const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
 
+// Optional feature flags — disabled by default, enable via Railway env vars
+const ENABLE_SCHEMA_WRITES = process.env.ENABLE_SCHEMA_WRITES === "true";
+const ENABLE_COMMENTS = process.env.ENABLE_COMMENTS === "true";
+
 if (!AIRTABLE_API_KEY) throw new Error("Missing AIRTABLE_API_KEY");
 if (!AIRTABLE_BASE_ID) throw new Error("Missing AIRTABLE_BASE_ID");
 
@@ -61,6 +65,45 @@ async function getTables({ forceRefresh = false } = {}) {
   return fetchTablesFresh();
 }
 
+/**
+ * Resolve a record ID from either a bare record ID string or a field-value
+ * lookup. Accepts:
+ *   - { recordId: "recXXX" }
+ *   - { tableName, lookupField, lookupValue }
+ */
+async function resolveRecordId({ tableName, recordId, lookupField, lookupValue }) {
+  if (recordId) return recordId;
+  if (!tableName || !lookupField || lookupValue === undefined) {
+    throw new Error(
+      "Provide either recordId or all of: tableName, lookupField, lookupValue"
+    );
+  }
+  const safeValue = String(lookupValue).replace(/"/g, '\\"');
+  const formula = `{${lookupField}} = "${safeValue}"`;
+  const records = await base(tableName).select({ filterByFormula: formula, maxRecords: 1 }).all();
+  if (!records.length) {
+    throw new Error(
+      `No record found in "${tableName}" where ${lookupField} = "${lookupValue}"`
+    );
+  }
+  return records[0].id;
+}
+
+/**
+ * Validate that every key in `fields` exists in the table schema.
+ * Unknown fields are returned as a warning list rather than a hard error so
+ * callers can decide how to handle them.
+ */
+async function validateFields(tableName, fields) {
+  const tables = await getTables();
+  const table = tables.find((t) => t.name === tableName);
+  if (!table) return { valid: true, unknownFields: [] };
+
+  const knownNames = new Set((table.fields ?? []).map((f) => f.name));
+  const unknownFields = Object.keys(fields).filter((k) => !knownNames.has(k));
+  return { valid: unknownFields.length === 0, unknownFields };
+}
+
 function normalizeRecords(records) {
   return records.map((record) => ({
     id: record.id,
@@ -68,10 +111,50 @@ function normalizeRecords(records) {
   }));
 }
 
+/** Wrap a tool handler so errors always return a structured MCP error response. */
+function safeHandler(fn) {
+  return async (args) => {
+    try {
+      return await fn(args);
+    } catch (err) {
+      const message = err?.message ?? String(err);
+      console.error("[airtable-mcp] tool error:", message);
+      return {
+        isError: true,
+        content: [{ type: "text", text: JSON.stringify({ error: message }, null, 2) }]
+      };
+    }
+  };
+}
+
 const mcpServer = new McpServer({
   name: "airtable-mcp",
-  version: "5.0.0"
+  version: "6.0.0"
 });
+
+/* ---------------- CAPABILITY REPORT ---------------- */
+
+mcpServer.tool(
+  "get_capabilities",
+  "Report which optional features are enabled on this MCP server",
+  {},
+  safeHandler(async () => {
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify(
+          {
+            schemaWrites: ENABLE_SCHEMA_WRITES,
+            comments: ENABLE_COMMENTS,
+            version: "6.0.0"
+          },
+          null,
+          2
+        )
+      }]
+    };
+  })
+);
 
 /* ---------------- TABLES / SCHEMA ---------------- */
 
@@ -79,7 +162,7 @@ mcpServer.tool(
   "list_tables",
   "List all tables in the Airtable base",
   {},
-  async () => {
+  safeHandler(async () => {
     const tables = await getTables();
 
     return {
@@ -96,7 +179,7 @@ mcpServer.tool(
         )
       }]
     };
-  }
+  })
 );
 
 mcpServer.tool(
@@ -106,7 +189,7 @@ mcpServer.tool(
     tableName: z.string().optional(),
     forceRefresh: z.boolean().optional()
   },
-  async ({ tableName, forceRefresh = false }) => {
+  safeHandler(async ({ tableName, forceRefresh = false }) => {
     const tables = await getTables({ forceRefresh });
 
     if (tableName) {
@@ -156,7 +239,7 @@ mcpServer.tool(
         )
       }]
     };
-  }
+  })
 );
 
 /* ---------------- RECORD READ ---------------- */
@@ -168,7 +251,7 @@ mcpServer.tool(
     tableName: z.string(),
     maxRecords: z.number().int().min(1).max(100).optional()
   },
-  async ({ tableName, maxRecords = 20 }) => {
+  safeHandler(async ({ tableName, maxRecords = 20 }) => {
     const records = await base(tableName).select({ maxRecords }).all();
 
     return {
@@ -177,7 +260,7 @@ mcpServer.tool(
         text: JSON.stringify(normalizeRecords(records), null, 2)
       }]
     };
-  }
+  })
 );
 
 mcpServer.tool(
@@ -187,7 +270,7 @@ mcpServer.tool(
     tableName: z.string(),
     recordId: z.string()
   },
-  async ({ tableName, recordId }) => {
+  safeHandler(async ({ tableName, recordId }) => {
     const record = await base(tableName).find(recordId);
 
     return {
@@ -200,7 +283,28 @@ mcpServer.tool(
         )
       }]
     };
-  }
+  })
+);
+
+mcpServer.tool(
+  "resolve_record",
+  "Resolve a record ID by looking up a field value, or confirm an existing record ID",
+  {
+    tableName: z.string(),
+    recordId: z.string().optional(),
+    lookupField: z.string().optional(),
+    lookupValue: z.string().optional()
+  },
+  safeHandler(async ({ tableName, recordId, lookupField, lookupValue }) => {
+    const id = await resolveRecordId({ tableName, recordId, lookupField, lookupValue });
+    const record = await base(tableName).find(id);
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({ id: record.id, fields: record.fields }, null, 2)
+      }]
+    };
+  })
 );
 
 mcpServer.tool(
@@ -212,7 +316,7 @@ mcpServer.tool(
     query: z.string(),
     maxRecords: z.number().int().min(1).max(100).optional()
   },
-  async ({ tableName, fieldName, query, maxRecords = 20 }) => {
+  safeHandler(async ({ tableName, fieldName, query, maxRecords = 20 }) => {
     const safeQuery = query.replace(/"/g, '\\"');
     const formula = `FIND(LOWER("${safeQuery}"), LOWER({${fieldName}}))`;
 
@@ -229,7 +333,7 @@ mcpServer.tool(
         text: JSON.stringify(normalizeRecords(records), null, 2)
       }]
     };
-  }
+  })
 );
 
 mcpServer.tool(
@@ -241,7 +345,7 @@ mcpServer.tool(
     query: z.string(),
     maxPerTable: z.number().int().min(1).max(50).optional()
   },
-  async ({ tableNames, fieldName, query, maxPerTable = 10 }) => {
+  safeHandler(async ({ tableNames, fieldName, query, maxPerTable = 10 }) => {
     const safeQuery = query.replace(/"/g, '\\"');
     const formula = `FIND(LOWER("${safeQuery}"), LOWER({${fieldName}}))`;
 
@@ -266,7 +370,7 @@ mcpServer.tool(
         text: JSON.stringify(results, null, 2)
       }]
     };
-  }
+  })
 );
 
 /* ---------------- RECORD WRITE ---------------- */
@@ -278,15 +382,21 @@ mcpServer.tool(
     tableName: z.string(),
     fields: z.record(z.any())
   },
-  async ({ tableName, fields }) => {
+  safeHandler(async ({ tableName, fields }) => {
+    const { unknownFields } = await validateFields(tableName, fields);
     const created = await base(tableName).create([{ fields }]);
+    const result = normalizeRecords(created);
     return {
       content: [{
         type: "text",
-        text: JSON.stringify(normalizeRecords(created), null, 2)
+        text: JSON.stringify(
+          unknownFields.length ? { records: result, warnings: { unknownFields } } : result,
+          null,
+          2
+        )
       }]
     };
-  }
+  })
 );
 
 mcpServer.tool(
@@ -294,18 +404,27 @@ mcpServer.tool(
   "Update one Airtable record",
   {
     tableName: z.string(),
-    recordId: z.string(),
+    recordId: z.string().optional(),
+    lookupField: z.string().optional(),
+    lookupValue: z.string().optional(),
     fields: z.record(z.any())
   },
-  async ({ tableName, recordId, fields }) => {
-    const updated = await base(tableName).update([{ id: recordId, fields }]);
+  safeHandler(async ({ tableName, recordId, lookupField, lookupValue, fields }) => {
+    const id = await resolveRecordId({ tableName, recordId, lookupField, lookupValue });
+    const { unknownFields } = await validateFields(tableName, fields);
+    const updated = await base(tableName).update([{ id, fields }]);
+    const result = normalizeRecords(updated);
     return {
       content: [{
         type: "text",
-        text: JSON.stringify(normalizeRecords(updated), null, 2)
+        text: JSON.stringify(
+          unknownFields.length ? { records: result, warnings: { unknownFields } } : result,
+          null,
+          2
+        )
       }]
     };
-  }
+  })
 );
 
 mcpServer.tool(
@@ -313,17 +432,20 @@ mcpServer.tool(
   "Delete one Airtable record",
   {
     tableName: z.string(),
-    recordId: z.string()
+    recordId: z.string().optional(),
+    lookupField: z.string().optional(),
+    lookupValue: z.string().optional()
   },
-  async ({ tableName, recordId }) => {
-    const deleted = await base(tableName).destroy([recordId]);
+  safeHandler(async ({ tableName, recordId, lookupField, lookupValue }) => {
+    const id = await resolveRecordId({ tableName, recordId, lookupField, lookupValue });
+    const deleted = await base(tableName).destroy([id]);
     return {
       content: [{
         type: "text",
         text: JSON.stringify(deleted, null, 2)
       }]
     };
-  }
+  })
 );
 
 /* ---------------- BATCH WRITE ---------------- */
@@ -335,7 +457,7 @@ mcpServer.tool(
     tableName: z.string(),
     records: z.array(z.record(z.any())).min(1).max(10)
   },
-  async ({ tableName, records }) => {
+  safeHandler(async ({ tableName, records }) => {
     const created = await base(tableName).create(
       records.map((fields) => ({ fields }))
     );
@@ -345,7 +467,7 @@ mcpServer.tool(
         text: JSON.stringify(normalizeRecords(created), null, 2)
       }]
     };
-  }
+  })
 );
 
 mcpServer.tool(
@@ -360,7 +482,7 @@ mcpServer.tool(
       })
     ).min(1).max(10)
   },
-  async ({ tableName, records }) => {
+  safeHandler(async ({ tableName, records }) => {
     const updated = await base(tableName).update(
       records.map(({ recordId, fields }) => ({
         id: recordId,
@@ -373,7 +495,7 @@ mcpServer.tool(
         text: JSON.stringify(normalizeRecords(updated), null, 2)
       }]
     };
-  }
+  })
 );
 
 mcpServer.tool(
@@ -383,7 +505,7 @@ mcpServer.tool(
     tableName: z.string(),
     recordIds: z.array(z.string()).min(1).max(10)
   },
-  async ({ tableName, recordIds }) => {
+  safeHandler(async ({ tableName, recordIds }) => {
     const deleted = await base(tableName).destroy(recordIds);
     return {
       content: [{
@@ -391,12 +513,12 @@ mcpServer.tool(
         text: JSON.stringify(deleted, null, 2)
       }]
     };
-  }
+  })
 );
 
 mcpServer.tool(
   "batch_upsert_records",
-  "Upsert multiple Airtable records by record ID when present, otherwise create them",
+  "Idempotent upsert: update records that have a recordId, create those that do not",
   {
     tableName: z.string(),
     records: z.array(
@@ -406,7 +528,7 @@ mcpServer.tool(
       })
     ).min(1).max(10)
   },
-  async ({ tableName, records }) => {
+  safeHandler(async ({ tableName, records }) => {
     const toCreate = records.filter((r) => !r.recordId);
     const toUpdate = records.filter((r) => !!r.recordId);
 
@@ -435,43 +557,65 @@ mcpServer.tool(
         text: JSON.stringify(result, null, 2)
       }]
     };
-  }
+  })
 );
 
 /* ---------------- COMMENTS ---------------- */
 
 mcpServer.tool(
   "list_record_comments",
-  "List comments on an Airtable record",
+  "List comments on an Airtable record (requires ENABLE_COMMENTS=true)",
   {
+    tableName: z.string(),
     recordId: z.string()
   },
-  async ({ recordId }) => {
-    throw new Error(
-      "Comment endpoints are not working yet in this MCP. Record comments are currently disabled pending a targeted API fix."
+  safeHandler(async ({ tableName, recordId }) => {
+    if (!ENABLE_COMMENTS) {
+      throw new Error(
+        "Comments are disabled. Set ENABLE_COMMENTS=true in Railway environment variables to enable this feature."
+      );
+    }
+    const data = await airtableMetaFetch(
+      `/bases/${AIRTABLE_BASE_ID}/tables/${tableName}/records/${recordId}/comments`
     );
-  }
+    return {
+      content: [{ type: "text", text: JSON.stringify(data, null, 2) }]
+    };
+  })
 );
 
 mcpServer.tool(
   "create_record_comment",
-  "Create a comment on an Airtable record",
+  "Create a comment on an Airtable record (requires ENABLE_COMMENTS=true)",
   {
+    tableName: z.string(),
     recordId: z.string(),
     text: z.string()
   },
-  async ({ recordId, text }) => {
-    throw new Error(
-      "Comment endpoints are not working yet in this MCP. Record comments are currently disabled pending a targeted API fix."
+  safeHandler(async ({ tableName, recordId, text }) => {
+    if (!ENABLE_COMMENTS) {
+      throw new Error(
+        "Comments are disabled. Set ENABLE_COMMENTS=true in Railway environment variables to enable this feature."
+      );
+    }
+    const data = await airtableMetaFetch(
+      `/bases/${AIRTABLE_BASE_ID}/tables/${tableName}/records/${recordId}/comments`,
+      {
+        method: "POST",
+        body: JSON.stringify({ text })
+      }
     );
-  }
+    return {
+      content: [{ type: "text", text: JSON.stringify(data, null, 2) }]
+    };
+  })
 );
 
 /* ---------------- SCHEMA WRITE ---------------- */
 
 mcpServer.tool(
   "create_table",
-  "Create a new Airtable table",
+  "Create a new Airtable table (requires ENABLE_SCHEMA_WRITES=true)",
   {
     tableName: z.string(),
     fields: z.array(
@@ -481,7 +625,12 @@ mcpServer.tool(
       })
     ).min(1)
   },
-  async ({ tableName, fields }) => {
+  safeHandler(async ({ tableName, fields }) => {
+    if (!ENABLE_SCHEMA_WRITES) {
+      throw new Error(
+        "Schema writes are disabled. Set ENABLE_SCHEMA_WRITES=true in Railway environment variables to enable this feature."
+      );
+    }
     const data = await airtableMetaFetch(`/bases/${AIRTABLE_BASE_ID}/tables`, {
       method: "POST",
       body: JSON.stringify({
@@ -498,18 +647,24 @@ mcpServer.tool(
         text: JSON.stringify(data, null, 2)
       }]
     };
-  }
+  })
 );
+
 
 mcpServer.tool(
   "create_field",
-  "Create a field in an Airtable table",
+  "Create a field in an Airtable table (requires ENABLE_SCHEMA_WRITES=true)",
   {
     tableId: z.string(),
     fieldName: z.string(),
     fieldType: z.string()
   },
-  async ({ tableId, fieldName, fieldType }) => {
+  safeHandler(async ({ tableId, fieldName, fieldType }) => {
+    if (!ENABLE_SCHEMA_WRITES) {
+      throw new Error(
+        "Schema writes are disabled. Set ENABLE_SCHEMA_WRITES=true in Railway environment variables to enable this feature."
+      );
+    }
     const data = await airtableMetaFetch(`/bases/${AIRTABLE_BASE_ID}/tables/${tableId}/fields`, {
       method: "POST",
       body: JSON.stringify({
@@ -526,19 +681,24 @@ mcpServer.tool(
         text: JSON.stringify(data, null, 2)
       }]
     };
-  }
+  })
 );
 
 mcpServer.tool(
   "update_field",
-  "Update an Airtable field",
+  "Update an Airtable field (requires ENABLE_SCHEMA_WRITES=true)",
   {
     tableId: z.string(),
     fieldId: z.string(),
     name: z.string().optional(),
     description: z.string().optional()
   },
-  async ({ tableId, fieldId, name, description }) => {
+  safeHandler(async ({ tableId, fieldId, name, description }) => {
+    if (!ENABLE_SCHEMA_WRITES) {
+      throw new Error(
+        "Schema writes are disabled. Set ENABLE_SCHEMA_WRITES=true in Railway environment variables to enable this feature."
+      );
+    }
     const body = {};
     if (name !== undefined) body.name = name;
     if (description !== undefined) body.description = description;
@@ -556,7 +716,7 @@ mcpServer.tool(
         text: JSON.stringify(data, null, 2)
       }]
     };
-  }
+  })
 );
 
 /* ---------------- ATTACHMENTS BY URL ---------------- */
@@ -571,7 +731,7 @@ mcpServer.tool(
     fileUrl: z.string().url(),
     filename: z.string().optional()
   },
-  async ({ tableName, recordId, attachmentFieldName, fileUrl, filename }) => {
+  safeHandler(async ({ tableName, recordId, attachmentFieldName, fileUrl, filename }) => {
     const fields = {
       [attachmentFieldName]: [
         filename ? { url: fileUrl, filename } : { url: fileUrl }
@@ -585,7 +745,7 @@ mcpServer.tool(
         text: JSON.stringify(normalizeRecords(updated), null, 2)
       }]
     };
-  }
+  })
 );
 
 mcpServer.tool(
@@ -598,7 +758,7 @@ mcpServer.tool(
     fileUrl: z.string().url(),
     filename: z.string().optional()
   },
-  async ({ tableName, recordId, attachmentFieldName, fileUrl, filename }) => {
+  safeHandler(async ({ tableName, recordId, attachmentFieldName, fileUrl, filename }) => {
     const record = await base(tableName).find(recordId);
     const existing = Array.isArray(record.fields[attachmentFieldName])
       ? record.fields[attachmentFieldName]
@@ -617,7 +777,7 @@ mcpServer.tool(
         text: JSON.stringify(normalizeRecords(updated), null, 2)
       }]
     };
-  }
+  })
 );
 
 /* ---------------- HTTP SERVER ---------------- */
@@ -629,14 +789,24 @@ app.get("/", (_req, res) => {
   res.json({
     ok: true,
     name: "airtable-mcp",
-    message: "Airtable MCP server is running"
+    version: "6.0.0",
+    message: "Airtable MCP server is running",
+    capabilities: {
+      schemaWrites: ENABLE_SCHEMA_WRITES,
+      comments: ENABLE_COMMENTS
+    }
   });
 });
 
 app.get("/health", (_req, res) => {
   res.json({
     ok: true,
-    schemaCacheAgeMs: schemaCache.tables ? Date.now() - schemaCache.fetchedAt : null
+    version: "6.0.0",
+    schemaCacheAgeMs: schemaCache.tables ? Date.now() - schemaCache.fetchedAt : null,
+    capabilities: {
+      schemaWrites: ENABLE_SCHEMA_WRITES,
+      comments: ENABLE_COMMENTS
+    }
   });
 });
 
@@ -663,5 +833,7 @@ app.post("/mcp", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Airtable MCP listening on port ${PORT}`);
+  console.log(`Airtable MCP v6.0.0 listening on port ${PORT}`);
+  console.log(`  Schema writes: ${ENABLE_SCHEMA_WRITES ? "ENABLED" : "disabled"}`);
+  console.log(`  Comments:      ${ENABLE_COMMENTS ? "ENABLED" : "disabled"}`);
 });
