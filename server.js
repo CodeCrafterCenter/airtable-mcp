@@ -19,23 +19,24 @@ if (!AIRTABLE_BASE_ID) {
 const airtable = new Airtable({ apiKey: AIRTABLE_API_KEY });
 const base = airtable.base(AIRTABLE_BASE_ID);
 
-async function getTables() {
-  const response = await fetch(
-    `https://api.airtable.com/v0/meta/bases/${AIRTABLE_BASE_ID}/tables`,
-    {
-      headers: {
-        Authorization: `Bearer ${AIRTABLE_API_KEY}`,
-        "Content-Type": "application/json"
-      }
+async function fetchAirtableMeta(path) {
+  const response = await fetch(`https://api.airtable.com/v0/meta${path}`, {
+    headers: {
+      Authorization: `Bearer ${AIRTABLE_API_KEY}`,
+      "Content-Type": "application/json"
     }
-  );
+  });
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`Failed to fetch tables: ${response.status} ${text}`);
+    throw new Error(`Airtable meta API failed: ${response.status} ${text}`);
   }
 
-  const data = await response.json();
+  return response.json();
+}
+
+async function getTables() {
+  const data = await fetchAirtableMeta(`/bases/${AIRTABLE_BASE_ID}/tables`);
   return data.tables ?? [];
 }
 
@@ -59,10 +60,42 @@ mcpServer.tool(
             tables.map((t) => ({
               id: t.id,
               name: t.name,
-              fields: t.fields?.map((f) => ({
+              description: t.description ?? null
+            })),
+            null,
+            2
+          )
+        }
+      ]
+    };
+  }
+);
+
+mcpServer.tool(
+  "get_table_schema",
+  "Get schema for tables in the Airtable base",
+  {
+    tableName: z.string().optional()
+  },
+  async ({ tableName }) => {
+    const tables = await getTables();
+    const filtered = tableName
+      ? tables.filter((t) => t.name === tableName)
+      : tables;
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            filtered.map((t) => ({
+              id: t.id,
+              name: t.name,
+              fields: (t.fields ?? []).map((f) => ({
                 id: f.id,
                 name: f.name,
-                type: f.type
+                type: f.type,
+                description: f.description ?? null
               }))
             })),
             null,
@@ -132,14 +165,15 @@ mcpServer.tool(
 
 mcpServer.tool(
   "search_records",
-  "Search Airtable records by plain text in a chosen field",
+  "Search Airtable records by text in a chosen field",
   {
     tableName: z.string(),
     fieldName: z.string(),
     query: z.string()
   },
   async ({ tableName, fieldName, query }) => {
-    const formula = `FIND(LOWER("${query.replace(/"/g, '\\"')}"), LOWER({${fieldName}}))`;
+    const safeQuery = query.replace(/"/g, '\\"');
+    const formula = `FIND(LOWER("${safeQuery}"), LOWER({${fieldName}}))`;
 
     const records = await base(tableName)
       .select({
@@ -160,6 +194,178 @@ mcpServer.tool(
             null,
             2
           )
+        }
+      ]
+    };
+  }
+);
+
+mcpServer.tool(
+  "create_record",
+  "Create a new Airtable record in a table",
+  {
+    tableName: z.string(),
+    fields: z.record(z.any())
+  },
+  async ({ tableName, fields }) => {
+    const created = await base(tableName).create([{ fields }]);
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            created.map((record) => ({
+              id: record.id,
+              fields: record.fields
+            })),
+            null,
+            2
+          )
+        }
+      ]
+    };
+  }
+);
+
+mcpServer.tool(
+  "update_record",
+  "Update an existing Airtable record",
+  {
+    tableName: z.string(),
+    recordId: z.string(),
+    fields: z.record(z.any())
+  },
+  async ({ tableName, recordId, fields }) => {
+    const updated = await base(tableName).update([
+      {
+        id: recordId,
+        fields
+      }
+    ]);
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            updated.map((record) => ({
+              id: record.id,
+              fields: record.fields
+            })),
+            null,
+            2
+          )
+        }
+      ]
+    };
+  }
+);
+
+mcpServer.tool(
+  "delete_record",
+  "Delete one Airtable record",
+  {
+    tableName: z.string(),
+    recordId: z.string()
+  },
+  async ({ tableName, recordId }) => {
+    const deleted = await base(tableName).destroy([recordId]);
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(deleted, null, 2)
+        }
+      ]
+    };
+  }
+);
+
+mcpServer.tool(
+  "batch_create_records",
+  "Create multiple Airtable records",
+  {
+    tableName: z.string(),
+    records: z.array(z.record(z.any())).min(1).max(10)
+  },
+  async ({ tableName, records }) => {
+    const created = await base(tableName).create(
+      records.map((fields) => ({ fields }))
+    );
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            created.map((record) => ({
+              id: record.id,
+              fields: record.fields
+            })),
+            null,
+            2
+          )
+        }
+      ]
+    };
+  }
+);
+
+mcpServer.tool(
+  "batch_update_records",
+  "Update multiple Airtable records",
+  {
+    tableName: z.string(),
+    records: z.array(
+      z.object({
+        recordId: z.string(),
+        fields: z.record(z.any())
+      })
+    ).min(1).max(10)
+  },
+  async ({ tableName, records }) => {
+    const updated = await base(tableName).update(
+      records.map(({ recordId, fields }) => ({
+        id: recordId,
+        fields
+      }))
+    );
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            updated.map((record) => ({
+              id: record.id,
+              fields: record.fields
+            })),
+            null,
+            2
+          )
+        }
+      ]
+    };
+  }
+);
+
+mcpServer.tool(
+  "batch_delete_records",
+  "Delete multiple Airtable records",
+  {
+    tableName: z.string(),
+    recordIds: z.array(z.string()).min(1).max(10)
+  },
+  async ({ tableName, recordIds }) => {
+    const deleted = await base(tableName).destroy(recordIds);
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(deleted, null, 2)
         }
       ]
     };
