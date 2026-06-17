@@ -14,6 +14,12 @@ if (!AIRTABLE_BASE_ID) throw new Error("Missing AIRTABLE_BASE_ID");
 const airtable = new Airtable({ apiKey: AIRTABLE_API_KEY });
 const base = airtable.base(AIRTABLE_BASE_ID);
 
+const SCHEMA_CACHE_TTL_MS = 5 * 60 * 1000;
+let schemaCache = {
+  fetchedAt: 0,
+  tables: null
+};
+
 async function airtableFetch(path, options = {}) {
   const response = await fetch(`https://api.airtable.com/v0${path}`, {
     ...options,
@@ -52,16 +58,33 @@ async function airtableMetaFetch(path, options = {}) {
   return response.json();
 }
 
-async function getTables() {
+async function fetchTablesFresh() {
   const data = await airtableMetaFetch(`/bases/${AIRTABLE_BASE_ID}/tables`);
-  return data.tables ?? [];
+  const tables = data.tables ?? [];
+  schemaCache = {
+    fetchedAt: Date.now(),
+    tables
+  };
+  return tables;
+}
+
+async function getTables({ forceRefresh = false } = {}) {
+  const isFresh =
+    schemaCache.tables &&
+    Date.now() - schemaCache.fetchedAt < SCHEMA_CACHE_TTL_MS;
+
+  if (!forceRefresh && isFresh) {
+    return schemaCache.tables;
+  }
+
+  return fetchTablesFresh();
 }
 
 async function getTableByName(tableName) {
   const tables = await getTables();
-  const table = tables.find((t) => t.name === tableName);
-  if (!table) throw new Error(`Table not found: ${tableName}`);
-  return table;
+  const found = tables.find((t) => t.name === tableName);
+  if (!found) throw new Error(`Table not found: ${tableName}`);
+  return found;
 }
 
 function normalizeRecords(records) {
@@ -73,10 +96,10 @@ function normalizeRecords(records) {
 
 const mcpServer = new McpServer({
   name: "airtable-mcp",
-  version: "3.0.0"
+  version: "4.0.0"
 });
 
-/* ---------------- TABLES / SCHEMA READ ---------------- */
+/* ---------------- TABLES / SCHEMA ---------------- */
 
 mcpServer.tool(
   "list_tables",
@@ -106,17 +129,44 @@ mcpServer.tool(
   "get_table_schema",
   "Get schema for one table or all tables in the Airtable base",
   {
-    tableName: z.string().optional()
+    tableName: z.string().optional(),
+    forceRefresh: z.boolean().optional()
   },
-  async ({ tableName }) => {
-    const tables = await getTables();
-    const filtered = tableName ? tables.filter((t) => t.name === tableName) : tables;
+  async ({ tableName, forceRefresh = false }) => {
+    const tables = await getTables({ forceRefresh });
+
+    if (tableName) {
+      const t = tables.find((x) => x.name === tableName);
+      if (!t) throw new Error(`Table not found: ${tableName}`);
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify(
+            {
+              id: t.id,
+              name: t.name,
+              description: t.description ?? null,
+              fields: (t.fields ?? []).map((f) => ({
+                id: f.id,
+                name: f.name,
+                type: f.type,
+                description: f.description ?? null,
+                options: f.options ?? null
+              }))
+            },
+            null,
+            2
+          )
+        }]
+      };
+    }
 
     return {
       content: [{
         type: "text",
         text: JSON.stringify(
-          filtered.map((t) => ({
+          tables.map((t) => ({
             id: t.id,
             name: t.name,
             description: t.description ?? null,
@@ -124,8 +174,7 @@ mcpServer.tool(
               id: f.id,
               name: f.name,
               type: f.type,
-              description: f.description ?? null,
-              options: f.options ?? null
+              description: f.description ?? null
             }))
           })),
           null,
@@ -171,10 +220,7 @@ mcpServer.tool(
       content: [{
         type: "text",
         text: JSON.stringify(
-          {
-            id: record.id,
-            fields: record.fields
-          },
+          { id: record.id, fields: record.fields },
           null,
           2
         )
@@ -189,16 +235,17 @@ mcpServer.tool(
   {
     tableName: z.string(),
     fieldName: z.string(),
-    query: z.string()
+    query: z.string(),
+    maxRecords: z.number().int().min(1).max(100).optional()
   },
-  async ({ tableName, fieldName, query }) => {
+  async ({ tableName, fieldName, query, maxRecords = 20 }) => {
     const safeQuery = query.replace(/"/g, '\\"');
     const formula = `FIND(LOWER("${safeQuery}"), LOWER({${fieldName}}))`;
 
     const records = await base(tableName)
       .select({
         filterByFormula: formula,
-        maxRecords: 20
+        maxRecords
       })
       .all();
 
@@ -213,7 +260,7 @@ mcpServer.tool(
 
 mcpServer.tool(
   "find_records_across_tables",
-  "Search the same field/query pattern across multiple Airtable tables",
+  "Search across multiple Airtable tables",
   {
     tableNames: z.array(z.string()).min(1).max(10),
     fieldName: z.string(),
@@ -225,7 +272,6 @@ mcpServer.tool(
     const formula = `FIND(LOWER("${safeQuery}"), LOWER({${fieldName}}))`;
 
     const results = [];
-
     for (const tableName of tableNames) {
       const records = await base(tableName)
         .select({
@@ -260,7 +306,6 @@ mcpServer.tool(
   },
   async ({ tableName, fields }) => {
     const created = await base(tableName).create([{ fields }]);
-
     return {
       content: [{
         type: "text",
@@ -280,7 +325,6 @@ mcpServer.tool(
   },
   async ({ tableName, recordId, fields }) => {
     const updated = await base(tableName).update([{ id: recordId, fields }]);
-
     return {
       content: [{
         type: "text",
@@ -299,7 +343,6 @@ mcpServer.tool(
   },
   async ({ tableName, recordId }) => {
     const deleted = await base(tableName).destroy([recordId]);
-
     return {
       content: [{
         type: "text",
@@ -322,7 +365,6 @@ mcpServer.tool(
     const created = await base(tableName).create(
       records.map((fields) => ({ fields }))
     );
-
     return {
       content: [{
         type: "text",
@@ -351,7 +393,6 @@ mcpServer.tool(
         fields
       }))
     );
-
     return {
       content: [{
         type: "text",
@@ -370,7 +411,6 @@ mcpServer.tool(
   },
   async ({ tableName, recordIds }) => {
     const deleted = await base(tableName).destroy(recordIds);
-
     return {
       content: [{
         type: "text",
@@ -396,10 +436,7 @@ mcpServer.tool(
     const toCreate = records.filter((r) => !r.recordId);
     const toUpdate = records.filter((r) => !!r.recordId);
 
-    const result = {
-      created: [],
-      updated: []
-    };
+    const result = { created: [], updated: [] };
 
     if (toCreate.length) {
       const created = await base(tableName).create(
@@ -437,7 +474,6 @@ mcpServer.tool(
   },
   async ({ recordId }) => {
     const data = await airtableFetch(`/meta/bases/${AIRTABLE_BASE_ID}/records/${recordId}/comments`);
-
     return {
       content: [{
         type: "text",
@@ -459,7 +495,6 @@ mcpServer.tool(
       method: "POST",
       body: JSON.stringify({ text })
     });
-
     return {
       content: [{
         type: "text",
@@ -492,6 +527,8 @@ mcpServer.tool(
       })
     });
 
+    schemaCache.fetchedAt = 0;
+
     return {
       content: [{
         type: "text",
@@ -517,6 +554,8 @@ mcpServer.tool(
         type: fieldType
       })
     });
+
+    schemaCache.fetchedAt = 0;
 
     return {
       content: [{
@@ -546,6 +585,8 @@ mcpServer.tool(
       body: JSON.stringify(body)
     });
 
+    schemaCache.fetchedAt = 0;
+
     return {
       content: [{
         type: "text",
@@ -559,7 +600,7 @@ mcpServer.tool(
 
 mcpServer.tool(
   "attach_file_to_record",
-  "Replace an Airtable attachment field with one file URL",
+  "Replace an attachment field with one file URL",
   {
     tableName: z.string(),
     recordId: z.string(),
@@ -575,7 +616,6 @@ mcpServer.tool(
     };
 
     const updated = await base(tableName).update([{ id: recordId, fields }]);
-
     return {
       content: [{
         type: "text",
@@ -587,7 +627,7 @@ mcpServer.tool(
 
 mcpServer.tool(
   "append_attachment_to_record",
-  "Append a file URL to an existing Airtable attachment field without intentionally replacing existing attachments",
+  "Append a file URL to an existing attachment field",
   {
     tableName: z.string(),
     recordId: z.string(),
@@ -608,7 +648,6 @@ mcpServer.tool(
     };
 
     const updated = await base(tableName).update([{ id: recordId, fields }]);
-
     return {
       content: [{
         type: "text",
@@ -632,7 +671,10 @@ app.get("/", (_req, res) => {
 });
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true });
+  res.json({
+    ok: true,
+    schemaCacheAgeMs: schemaCache.tables ? Date.now() - schemaCache.fetchedAt : null
+  });
 });
 
 app.post("/mcp", async (req, res) => {
