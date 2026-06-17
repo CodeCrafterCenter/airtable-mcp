@@ -19,8 +19,6 @@ const SCHEMA_CACHE_TTL_MS = 5 * 60 * 1000;
 
 let schemaCache = { fetchedAt: 0, tables: null };
 
-const mcpServer = new McpServer({ name: "airtable-mcp", version: "5.1.0" });
-
 function jsonContent(payload) {
   return {
     content: [{ type: "text", text: JSON.stringify(payload, null, 2) }]
@@ -223,28 +221,6 @@ async function resolveRecordId({ tableName, recordId, lookupField, lookupValue }
   return records[0].id;
 }
 
-/**
- * Validate that every key in `fields` exists in the table schema.
- * Unknown fields are returned as a warning list rather than a hard error so
- * callers can decide how to handle them.
- */
-async function validateFields(tableName, fields) {
-  const tables = await getTables();
-  const table = tables.find((t) => t.name === tableName);
-  if (!table) return { valid: true, unknownFields: [] };
-
-  const knownNames = new Set((table.fields ?? []).map((f) => f.name));
-  const unknownFields = Object.keys(fields).filter((k) => !knownNames.has(k));
-  return { valid: unknownFields.length === 0, unknownFields };
-}
-
-function normalizeRecords(records) {
-  return records.map((record) => ({
-    id: record.id,
-    fields: record.fields
-  }));
-}
-
 /** Wrap a tool handler so errors always return a structured MCP error response. */
 function safeHandler(fn) {
   return async (args) => {
@@ -289,86 +265,6 @@ mcpServer.tool(
     };
   })
 );
-
-/* ---------------- TABLES / SCHEMA ---------------- */
-
-mcpServer.tool(
-  "list_tables",
-  "List all tables in the Airtable base",
-  {},
-  safeHandler(async () => {
-    const tables = await getTables();
-
-function summarizeResolution(scoredRecords) {
-  const sorted = [...scoredRecords].sort((a, b) => b.match.score - a.match.score);
-  const top = sorted[0] ?? null;
-  const second = sorted[1] ?? null;
-
-  if (!top) {
-    return {
-      status: "create_new_safe",
-      confidence: 0,
-      human_review_required: false,
-      duplicate_risk: false
-    };
-  })
-);
-
-  if (top.match.score >= 100 && (!second || second.match.score < 80)) {
-    return {
-      status: "exact_match",
-      confidence: top.match.score,
-      human_review_required: false,
-      duplicate_risk: false
-    };
-  }
-
-  if (top.match.score >= 40 && (!second || top.match.score - second.match.score >= 30)) {
-    return {
-      status: "likely_match",
-      confidence: top.match.score,
-      human_review_required: false,
-      duplicate_risk: false
-    };
-  }
-
-  return {
-    status: "human_review_required",
-    confidence: top.match.score,
-    human_review_required: true,
-    duplicate_risk: sorted.length > 1
-  };
-}
-
-/* ---------------- CAPABILITIES ---------------- */
-
-tool("get_capabilities", "Return MCP and Airtable capability status", {}, async () => {
-  const capabilities = {
-    canReadRecords: true,
-    canWriteRecords: true,
-    canReadSchema: true,
-    canWriteSchema: ENABLE_SCHEMA_WRITES,
-    canReadComments: ENABLE_COMMENTS,
-    canWriteComments: ENABLE_COMMENTS,
-    canAttachByUrl: true,
-    canUploadBinaryFiles: false,
-    canReplaceAttachments: true,
-    canAppendAttachments: true,
-    schemaCacheTtlMs: SCHEMA_CACHE_TTL_MS
-  };
-
-  return success("get_capabilities", {
-    service: "airtable-mcp",
-    version: "5.1.0",
-    baseIdConfigured: Boolean(AIRTABLE_BASE_ID),
-    capabilities,
-    notes: [
-      "Schema writes are disabled unless ENABLE_SCHEMA_WRITES=true.",
-      "Comment endpoints are disabled unless ENABLE_COMMENTS=true.",
-      "Attachment support is URL-based only; binary upload is not supported."
-    ]
-  });
-});
 
 /* ---------------- TABLES / SCHEMA ---------------- */
 
