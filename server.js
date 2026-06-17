@@ -82,9 +82,9 @@ async function getTables({ forceRefresh = false } = {}) {
 
 async function getTableByName(tableName) {
   const tables = await getTables();
-  const found = tables.find((t) => t.name === tableName);
-  if (!found) throw new Error(`Table not found: ${tableName}`);
-  return found;
+  const table = tables.find((t) => t.name === tableName);
+  if (!table) throw new Error(`Table not found: ${tableName}`);
+  return table;
 }
 
 function normalizeRecords(records) {
@@ -96,7 +96,7 @@ function normalizeRecords(records) {
 
 const mcpServer = new McpServer({
   name: "airtable-mcp",
-  version: "4.0.0"
+  version: "4.1.0"
 });
 
 /* ---------------- TABLES / SCHEMA ---------------- */
