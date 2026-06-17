@@ -20,25 +20,6 @@ let schemaCache = {
   tables: null
 };
 
-async function airtableFetch(path, options = {}) {
-  const response = await fetch(`https://api.airtable.com/v0${path}`, {
-    ...options,
-    headers: {
-      Authorization: `Bearer ${AIRTABLE_API_KEY}`,
-      "Content-Type": "application/json",
-      ...(options.headers || {})
-    }
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Airtable API failed: ${response.status} ${text}`);
-  }
-
-  if (response.status === 204) return {};
-  return response.json();
-}
-
 async function airtableMetaFetch(path, options = {}) {
   const response = await fetch(`https://api.airtable.com/v0/meta${path}`, {
     ...options,
@@ -80,13 +61,6 @@ async function getTables({ forceRefresh = false } = {}) {
   return fetchTablesFresh();
 }
 
-async function getTableByName(tableName) {
-  const tables = await getTables();
-  const table = tables.find((t) => t.name === tableName);
-  if (!table) throw new Error(`Table not found: ${tableName}`);
-  return table;
-}
-
 function normalizeRecords(records) {
   return records.map((record) => ({
     id: record.id,
@@ -96,7 +70,7 @@ function normalizeRecords(records) {
 
 const mcpServer = new McpServer({
   name: "airtable-mcp",
-  version: "4.1.0"
+  version: "5.0.0"
 });
 
 /* ---------------- TABLES / SCHEMA ---------------- */
@@ -473,13 +447,9 @@ mcpServer.tool(
     recordId: z.string()
   },
   async ({ recordId }) => {
-    const data = await airtableFetch(`/meta/bases/${AIRTABLE_BASE_ID}/records/${recordId}/comments`);
-    return {
-      content: [{
-        type: "text",
-        text: JSON.stringify(data, null, 2)
-      }]
-    };
+    throw new Error(
+      "Comment endpoints are not working yet in this MCP. Record comments are currently disabled pending a targeted API fix."
+    );
   }
 );
 
@@ -491,16 +461,9 @@ mcpServer.tool(
     text: z.string()
   },
   async ({ recordId, text }) => {
-    const data = await airtableFetch(`/meta/bases/${AIRTABLE_BASE_ID}/records/${recordId}/comments`, {
-      method: "POST",
-      body: JSON.stringify({ text })
-    });
-    return {
-      content: [{
-        type: "text",
-        text: JSON.stringify(data, null, 2)
-      }]
-    };
+    throw new Error(
+      "Comment endpoints are not working yet in this MCP. Record comments are currently disabled pending a targeted API fix."
+    );
   }
 );
 
