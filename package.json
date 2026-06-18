@@ -1,11 +1,11 @@
 {
   "name": "airtable-mcp",
-  "version": "6.1.0",
+  "version": "6.1.1",
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node server.js",
-    "check": "node --check server.js"
+    "start": "node --import ./tool-annotations-loader.js server.js",
+    "check": "node --check server.js && node --check tool-annotations-loader.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
