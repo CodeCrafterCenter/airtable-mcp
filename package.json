@@ -1,6 +1,6 @@
 {
   "name": "airtable-mcp",
-  "version": "6.1.2",
+  "version": "6.2.0",
   "private": true,
   "type": "module",
   "scripts": {
