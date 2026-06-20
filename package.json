@@ -1,11 +1,11 @@
 {
   "name": "airtable-mcp",
-  "version": "6.3.0",
+  "version": "6.4.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node --import ./uploader-security-loader.js --import ./tool-annotations-loader.js --import ./uploader-url-loader.js --import ./command-center-hygiene-loader.js server.js",
-    "check": "node --check server.js && node --check tool-annotations-loader.js && node --check uploader-security-loader.js && node --check uploader-url-loader.js && node --check command-center-hygiene-loader.js"
+    "start": "node --import ./uploader-security-loader.js --import ./tool-annotations-loader.js --import ./uploader-url-loader.js --import ./command-center-hygiene-loader.js --import ./command-center-reconciliation-loader.js server.js",
+    "check": "node --check server.js && node --check tool-annotations-loader.js && node --check uploader-security-loader.js && node --check uploader-url-loader.js && node --check command-center-hygiene-loader.js && node --check command-center-reconciliation-loader.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
