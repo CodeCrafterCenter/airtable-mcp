@@ -9,6 +9,7 @@ A Model Context Protocol (MCP) server for Airtable, designed to run on Railway.
 - **Safer field validation** — `create_record` and `update_record` validate field names against the cached table schema and surface unknown fields as warnings rather than silently sending them to Airtable.
 - **Record resolution** — `update_record`, `delete_record`, and the new `resolve_record` tool accept either a bare `recordId` or a `lookupField` + `lookupValue` pair, so callers don't need to know record IDs in advance.
 - **Idempotent upsert** — `batch_upsert_records` creates records without a `recordId` and updates those that have one, making it safe to call repeatedly.
+- **Command Center hygiene tools** — clean Contracts feeds hide legacy evidence pointers, and daily hygiene scans can detect clutter, normalize obvious evidence placeholders, and delete only fully blank rows when explicitly applied.
 - **Schema writes disabled by default** — `create_table`, `create_field`, and `update_field` require `ENABLE_SCHEMA_WRITES=true`.
 - **Comments disabled by default** — `list_record_comments` and `create_record_comment` require `ENABLE_COMMENTS=true`.
 
@@ -66,6 +67,16 @@ POST /mcp
 |---|---|
 | `attach_file_to_record` | Replace an attachment field with a file URL |
 | `append_attachment_to_record` | Append a file URL to an attachment field |
+
+### Command Center Hygiene
+| Tool | Description |
+|---|---|
+| `list_clean_contract_records` | Return a clean Contracts feed for app/default-view use, excluding blank rows and legacy evidence pointers while preserving them in Airtable for retrieval. |
+| `run_command_center_hygiene_scan` | Scan Command Center tables for blank rows, Contracts legacy pointers, and obvious PDF-ready evidence placeholders. Defaults to dry-run. In apply mode, can delete fully blank rows and normalize obvious non-contract evidence placeholders. |
+
+Daily automation should use `run_command_center_hygiene_scan` in dry-run mode by default. Low-risk auto-apply is limited to fully blank rows and obvious placeholder normalization. Human review is required before deleting legacy pointers, deleting fields/columns, changing legal/coverage/payment/claim status, or moving evidence when match confidence is not high.
+
+Airtable API clients should use `list_clean_contract_records` for a clean Contracts experience. Native Airtable UI view filters are not edited by this server; use the returned filter formula or a future UI/backend layer to hide legacy pointer rows in Airtable itself.
 
 ### Comments _(requires `ENABLE_COMMENTS=true`)_
 | Tool | Description |
