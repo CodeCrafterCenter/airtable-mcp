@@ -10,6 +10,7 @@ A Model Context Protocol (MCP) server for Airtable, designed to run on Railway.
 - **Record resolution** — `update_record`, `delete_record`, and the new `resolve_record` tool accept either a bare `recordId` or a `lookupField` + `lookupValue` pair, so callers don't need to know record IDs in advance.
 - **Idempotent upsert** — `batch_upsert_records` creates records without a `recordId` and updates those that have one, making it safe to call repeatedly.
 - **Command Center hygiene tools** — clean Contracts feeds hide legacy evidence pointers, and daily hygiene scans can detect clutter, normalize obvious evidence placeholders, and delete only fully blank rows when explicitly applied.
+- **Command Center reconciliation tools** — daily scans can now generate a dry-run operating queue across Airtable tables and a cockpit-ready payload for the future web app.
 - **Schema writes disabled by default** — `create_table`, `create_field`, and `update_field` require `ENABLE_SCHEMA_WRITES=true`.
 - **Comments disabled by default** — `list_record_comments` and `create_record_comment` require `ENABLE_COMMENTS=true`.
 
@@ -78,6 +79,14 @@ Daily automation should use `run_command_center_hygiene_scan` in dry-run mode by
 
 Airtable API clients should use `list_clean_contract_records` for a clean Contracts experience. Native Airtable UI view filters are not edited by this server; use the returned filter formula or a future UI/backend layer to hide legacy pointer rows in Airtable itself.
 
+### Command Center Reconciliation
+| Tool | Description |
+|---|---|
+| `run_command_center_reconciliation_queue` | Build a dry-run operating queue across Tasks, Missing Documents, Attachment Intake Queue, disputes, claims, evidence, dashboard, and waiting-reply tables. Buckets records into Ready to execute, Waiting external, Needs source, Needs review, Done / do not repeat, and Superseded. Optional audit persistence writes only to AI Action Runs. |
+| `get_command_center_cockpit_payload` | Return a compact read-only payload for the future web cockpit, including summary cards, queue sections, approval actions, blocked actions, and the next best step. |
+
+Reconciliation is intentionally conservative. It can auto-surface stale/noisy/done/superseded records and propose high-confidence uploader actions, but it must not delete non-empty records, delete fields/columns, change legal/coverage/payment/claim status, move ambiguous evidence, or send communications without human review.
+
 ### Comments _(requires `ENABLE_COMMENTS=true`)_
 | Tool | Description |
 |---|---|
@@ -101,4 +110,5 @@ Returns `{ ok: true, version, schemaCacheAgeMs, capabilities }`.
 
 ## Deployment Notes
 
+- 2026-06-21: Added Command Center reconciliation tools v6.4.0 for dry-run queue generation and cockpit payloads.
 - 2026-06-20: Deployment marker for Command Center hygiene tools v6.3.0.
