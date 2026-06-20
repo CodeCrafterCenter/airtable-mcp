@@ -16,7 +16,7 @@ A Model Context Protocol (MCP) server for Airtable, designed to run on Railway.
 ## Environment Variables
 
 | Variable | Required | Default | Description |
-|---|---|---|---|
+|---|---|---|
 | `AIRTABLE_API_KEY` | ✅ | — | Airtable personal access token |
 | `AIRTABLE_BASE_ID` | ✅ | — | Airtable base ID (starts with `app`) |
 | `PORT` | | `3000` | HTTP port to listen on |
@@ -98,3 +98,7 @@ GET /health
 ```
 
 Returns `{ ok: true, version, schemaCacheAgeMs, capabilities }`.
+
+## Deployment Notes
+
+- 2026-06-20: Deployment marker for Command Center hygiene tools v6.3.0.
