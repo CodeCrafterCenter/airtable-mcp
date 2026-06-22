@@ -6,9 +6,11 @@ A Model Context Protocol (MCP) server for Airtable, designed to run on Railway.
 
 - **Structured error responses** — all tool errors return `{ isError: true, content: [{ type: "text", text: "{\"error\": \"...\"}" }] }` so MCP clients can handle failures gracefully instead of receiving unhandled exceptions.
 - **Capability reporting** — call `get_capabilities` to discover which optional features are enabled at runtime.
-- **Safer field validation** — `create_record` and `update_record` validate field names against the cached table schema and surface unknown fields as warnings rather than silently sending them to Airtable.
-- **Record resolution** — `update_record`, `delete_record`, `clear_record_fields`, and the new `resolve_record` tool accept either a bare `recordId` or a `lookupField` + `lookupValue` pair, so callers don't need to know record IDs in advance.
+- **Safer field validation** — `create_record`, `update_record`, and JSON utility writes validate field names against the cached table schema instead of silently sending bad field names to Airtable.
+- **Record resolution** — `update_record`, `delete_record`, `clear_record_fields`, `append_text_field`, `update_record_json`, and the `resolve_record` tool accept either a bare `recordId` or a `lookupField` + `lookupValue` pair, so callers don't need to know record IDs in advance.
 - **Dedicated field clearing** — `clear_record_fields` clears stale operational values by sending Airtable `null`, which avoids invalid empty-string writes for date and other typed fields.
+- **Typed JSON write utilities** — `update_record_json` and `batch_update_records_json` accept JSON strings so MCP clients can preserve `null`, booleans, numbers, arrays, and objects even when a client UI coerces ordinary field maps to strings.
+- **Append-only note updates** — `append_text_field` appends timestamped text to operational notes without overwriting existing history.
 - **Idempotent upsert** — `batch_upsert_records` creates records without a `recordId` and updates those that have one, making it safe to call repeatedly.
 - **Command Center hygiene tools** — clean Contracts feeds hide legacy evidence pointers, and daily hygiene scans can detect clutter, normalize obvious evidence placeholders, and delete only fully blank rows when explicitly applied.
 - **Command Center reconciliation tools** — daily scans can now generate a dry-run operating queue across Airtable tables and a cockpit-ready payload for the future web app.
@@ -24,6 +26,7 @@ A Model Context Protocol (MCP) server for Airtable, designed to run on Railway.
 | `PORT` | | `3000` | HTTP port to listen on |
 | `ENABLE_SCHEMA_WRITES` | | `false` | Set to `true` to enable `create_table`, `create_field`, `update_field` |
 | `ENABLE_COMMENTS` | | `false` | Set to `true` to enable `list_record_comments`, `create_record_comment` |
+| `AIRTABLE_MCP_DISPLAY_VERSION` | | package version fallback | Optional display-version override used by the metadata patch loader |
 
 ## MCP Endpoint
 
@@ -54,6 +57,8 @@ POST /mcp
 |---|---|
 | `create_record` | Create one record |
 | `update_record` | Update one record (by ID or field lookup) |
+| `update_record_json` | Update one record from a JSON string payload, preserving typed values such as `null` |
+| `append_text_field` | Append timestamped text to a text-like field without replacing existing notes |
 | `clear_record_fields` | Clear one or more field values by setting them to `null`; useful for stale dates and optional operational fields |
 | `delete_record` | Delete one record (by ID or field lookup) |
 
@@ -62,6 +67,7 @@ POST /mcp
 |---|---|
 | `batch_create_records` | Create up to 10 records |
 | `batch_update_records` | Update up to 10 records |
+| `batch_update_records_json` | Update up to 10 records from a JSON string array, preserving typed values such as `null` |
 | `batch_delete_records` | Delete up to 10 records |
 | `batch_upsert_records` | Idempotent upsert up to 10 records |
 
@@ -112,6 +118,7 @@ Returns `{ ok: true, version, schemaCacheAgeMs, capabilities }`.
 
 ## Deployment Notes
 
+- 2026-06-23: Added `update_record_json`, `batch_update_records_json`, and `append_text_field` v6.4.3 to reduce client schema coercion problems and safer note appends; added metadata patch loader so app-facing version responses stop showing stale `6.3.0`.
 - 2026-06-23: Added `clear_record_fields` v6.4.1 for safe typed-field clearing, especially stale date fields that reject empty strings.
 - 2026-06-21: Added Command Center reconciliation tools v6.4.0 for dry-run queue generation and cockpit payloads.
 - 2026-06-20: Deployment marker for Command Center hygiene tools v6.3.0.
