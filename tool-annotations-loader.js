@@ -28,8 +28,8 @@ function annotationsForTool(name) {
 
   return {
     readOnlyHint: false,
-    destructiveHint: name.includes("delete") || name === "attach_file_to_record",
-    idempotentHint: name.includes("update") || name.includes("upsert"),
+    destructiveHint: name.includes("delete") || name.includes("clear") || name === "attach_file_to_record",
+    idempotentHint: name.includes("update") || name.includes("upsert") || name.includes("clear"),
     openWorldHint: true
   };
 }
