@@ -7,7 +7,8 @@ A Model Context Protocol (MCP) server for Airtable, designed to run on Railway.
 - **Structured error responses** — all tool errors return `{ isError: true, content: [{ type: "text", text: "{\"error\": \"...\"}" }] }` so MCP clients can handle failures gracefully instead of receiving unhandled exceptions.
 - **Capability reporting** — call `get_capabilities` to discover which optional features are enabled at runtime.
 - **Safer field validation** — `create_record` and `update_record` validate field names against the cached table schema and surface unknown fields as warnings rather than silently sending them to Airtable.
-- **Record resolution** — `update_record`, `delete_record`, and the new `resolve_record` tool accept either a bare `recordId` or a `lookupField` + `lookupValue` pair, so callers don't need to know record IDs in advance.
+- **Record resolution** — `update_record`, `delete_record`, `clear_record_fields`, and the new `resolve_record` tool accept either a bare `recordId` or a `lookupField` + `lookupValue` pair, so callers don't need to know record IDs in advance.
+- **Dedicated field clearing** — `clear_record_fields` clears stale operational values by sending Airtable `null`, which avoids invalid empty-string writes for date and other typed fields.
 - **Idempotent upsert** — `batch_upsert_records` creates records without a `recordId` and updates those that have one, making it safe to call repeatedly.
 - **Command Center hygiene tools** — clean Contracts feeds hide legacy evidence pointers, and daily hygiene scans can detect clutter, normalize obvious evidence placeholders, and delete only fully blank rows when explicitly applied.
 - **Command Center reconciliation tools** — daily scans can now generate a dry-run operating queue across Airtable tables and a cockpit-ready payload for the future web app.
@@ -53,6 +54,7 @@ POST /mcp
 |---|---|
 | `create_record` | Create one record |
 | `update_record` | Update one record (by ID or field lookup) |
+| `clear_record_fields` | Clear one or more field values by setting them to `null`; useful for stale dates and optional operational fields |
 | `delete_record` | Delete one record (by ID or field lookup) |
 
 ### Batch Write
@@ -110,5 +112,6 @@ Returns `{ ok: true, version, schemaCacheAgeMs, capabilities }`.
 
 ## Deployment Notes
 
+- 2026-06-23: Added `clear_record_fields` v6.4.1 for safe typed-field clearing, especially stale date fields that reject empty strings.
 - 2026-06-21: Added Command Center reconciliation tools v6.4.0 for dry-run queue generation and cockpit payloads.
 - 2026-06-20: Deployment marker for Command Center hygiene tools v6.3.0.
