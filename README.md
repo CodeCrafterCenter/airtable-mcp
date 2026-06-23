@@ -105,7 +105,7 @@ Airtable API clients should use `list_clean_contract_records` for a clean Contra
 
 Reconciliation is intentionally conservative. It can auto-surface stale/noisy/done/superseded records and propose high-confidence uploader actions, but it must not delete non-empty records, delete fields/columns, change legal/coverage/payment/claim status, move ambiguous evidence, or send communications without human review.
 
-Starting in v6.4.7, reconciliation prioritizes explicit status fields before broad record text. This keeps active `Open`, `Waiting reply`, `Follow-up sent`, and similar records from being incorrectly buried in Done because an older note contains words like `closed`, `verified`, or `received`.
+Starting in v6.4.8, reconciliation prioritizes explicit status fields before broad record text. This keeps active `Open`, `Waiting reply`, `Follow-up sent`, and similar records from being incorrectly buried in Done because an older note contains words like `closed`, `verified`, or `received`, while avoiding broad `active` matches that can misread phrases like `not actively chased`.
 
 ### Comments _(requires `ENABLE_COMMENTS=true`)_
 | Tool | Description |
@@ -130,7 +130,7 @@ Returns `{ ok: true, version, schemaCacheAgeMs, capabilities }`.
 
 ## Deployment Notes
 
-- 2026-06-23: Tightened reconciliation classifier v6.4.7 so explicit current status fields take priority over stale note text, reducing false Done classifications for Open, Waiting reply, Follow-up sent, and active review items.
+- 2026-06-23: Tightened reconciliation classifier v6.4.8 so explicit current status fields take priority over stale note text, reducing false Done classifications for Open, Waiting reply, Follow-up sent, and active review items without overmatching generic `active` wording.
 - 2026-06-23: Added `create_audit_run`, `mark_record_resolved`, `append_operational_note`, `get_record_workpack`, and `dry_run_noise_cleanup` v6.4.4 for workflow execution, auditability, pre-action context, and noise reduction.
 - 2026-06-23: Added `update_record_json`, `batch_update_records_json`, and `append_text_field` v6.4.3 to reduce client schema coercion problems and safer note appends; added metadata patch loader so app-facing version responses stop showing stale `6.3.0`.
 - 2026-06-23: Added `clear_record_fields` v6.4.1 for safe typed-field clearing, especially stale date fields that reject empty strings.
