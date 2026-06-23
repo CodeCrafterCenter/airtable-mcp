@@ -7,10 +7,11 @@ A Model Context Protocol (MCP) server for Airtable, designed to run on Railway.
 - **Structured error responses** — all tool errors return `{ isError: true, content: [{ type: "text", text: "{\"error\": \"...\"}" }] }` so MCP clients can handle failures gracefully instead of receiving unhandled exceptions.
 - **Capability reporting** — call `get_capabilities` to discover which optional features are enabled at runtime.
 - **Safer field validation** — `create_record`, `update_record`, and JSON utility writes validate field names against the cached table schema instead of silently sending bad field names to Airtable.
-- **Record resolution** — `update_record`, `delete_record`, `clear_record_fields`, `append_text_field`, `update_record_json`, and the `resolve_record` tool accept either a bare `recordId` or a `lookupField` + `lookupValue` pair, so callers don't need to know record IDs in advance.
+- **Record resolution** — `update_record`, `delete_record`, `clear_record_fields`, `append_text_field`, `append_operational_note`, `mark_record_resolved`, `update_record_json`, and the `resolve_record` tool accept either a bare `recordId` or a `lookupField` + `lookupValue` pair, so callers don't need to know record IDs in advance.
 - **Dedicated field clearing** — `clear_record_fields` clears stale operational values by sending Airtable `null`, which avoids invalid empty-string writes for date and other typed fields.
 - **Typed JSON write utilities** — `update_record_json` and `batch_update_records_json` accept JSON strings so MCP clients can preserve `null`, booleans, numbers, arrays, and objects even when a client UI coerces ordinary field maps to strings.
-- **Append-only note updates** — `append_text_field` appends timestamped text to operational notes without overwriting existing history.
+- **Append-only note updates** — `append_text_field` and `append_operational_note` append timestamped text to operational notes without overwriting existing history.
+- **Workflow helper tools** — `get_record_workpack`, `mark_record_resolved`, `create_audit_run`, and `dry_run_noise_cleanup` support grounded Command Center operations while keeping risky decisions human-reviewed.
 - **Idempotent upsert** — `batch_upsert_records` creates records without a `recordId` and updates those that have one, making it safe to call repeatedly.
 - **Command Center hygiene tools** — clean Contracts feeds hide legacy evidence pointers, and daily hygiene scans can detect clutter, normalize obvious evidence placeholders, and delete only fully blank rows when explicitly applied.
 - **Command Center reconciliation tools** — daily scans can now generate a dry-run operating queue across Airtable tables and a cockpit-ready payload for the future web app.
@@ -51,6 +52,7 @@ POST /mcp
 | `resolve_record` | Resolve a record by field-value lookup or confirm an existing ID |
 | `search_records` | Search records by text in a field |
 | `find_records_across_tables` | Search across multiple tables |
+| `get_record_workpack` | Read-only workpack for one record plus selected linked records |
 
 ### Record Write
 | Tool | Description |
@@ -59,6 +61,8 @@ POST /mcp
 | `update_record` | Update one record (by ID or field lookup) |
 | `update_record_json` | Update one record from a JSON string payload, preserving typed values such as `null` |
 | `append_text_field` | Append timestamped text to a text-like field without replacing existing notes |
+| `append_operational_note` | Append a standardized Command Center note to the best available note field |
+| `mark_record_resolved` | Safely mark one operational record resolved/closed, clear stale dates, and append a note |
 | `clear_record_fields` | Clear one or more field values by setting them to `null`; useful for stale dates and optional operational fields |
 | `delete_record` | Delete one record (by ID or field lookup) |
 
@@ -70,6 +74,12 @@ POST /mcp
 | `batch_update_records_json` | Update up to 10 records from a JSON string array, preserving typed values such as `null` |
 | `batch_delete_records` | Delete up to 10 records |
 | `batch_upsert_records` | Idempotent upsert up to 10 records |
+
+### Workflow / Audit
+| Tool | Description |
+|---|---|
+| `create_audit_run` | Create a compact AI Action Runs audit record for a material operation |
+| `dry_run_noise_cleanup` | Dry-run stale/noise scan across operational tables; apply mode only clears stale follow-up fields on done records |
 
 ### Attachments
 | Tool | Description |
@@ -118,6 +128,7 @@ Returns `{ ok: true, version, schemaCacheAgeMs, capabilities }`.
 
 ## Deployment Notes
 
+- 2026-06-23: Added `create_audit_run`, `mark_record_resolved`, `append_operational_note`, `get_record_workpack`, and `dry_run_noise_cleanup` v6.4.4 for workflow execution, auditability, pre-action context, and noise reduction.
 - 2026-06-23: Added `update_record_json`, `batch_update_records_json`, and `append_text_field` v6.4.3 to reduce client schema coercion problems and safer note appends; added metadata patch loader so app-facing version responses stop showing stale `6.3.0`.
 - 2026-06-23: Added `clear_record_fields` v6.4.1 for safe typed-field clearing, especially stale date fields that reject empty strings.
 - 2026-06-21: Added Command Center reconciliation tools v6.4.0 for dry-run queue generation and cockpit payloads.
