@@ -1,11 +1,11 @@
 import express from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
-const DISPLAY_VERSION = process.env.AIRTABLE_MCP_DISPLAY_VERSION || "6.4.8";
+const DISPLAY_VERSION = process.env.AIRTABLE_MCP_DISPLAY_VERSION || "6.5.1";
 const originalJson = express.response.json;
 
 function patchVersionPayload(payload) {
-  if (payload && typeof payload === "object" && payload.version === "6.3.0") {
+  if (payload && typeof payload === "object" && typeof payload.version === "string" && payload.version !== DISPLAY_VERSION) {
     return { ...payload, version: DISPLAY_VERSION };
   }
   return payload;
