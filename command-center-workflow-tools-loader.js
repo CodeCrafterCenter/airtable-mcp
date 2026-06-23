@@ -153,6 +153,42 @@ function isDoneish(fields) {
   return ["done", "closed", "resolved", "uploaded", "superseded", "cancelled", "canceled", "archived"].some((term) => text.includes(term));
 }
 
+function isIsoDateOnly(value) {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value.trim());
+}
+
+function classifyDueDateNoise(value) {
+  if (isBlankValue(value)) return null;
+  const text = String(value).trim();
+  const lower = text.toLowerCase();
+  if (isIsoDateOnly(text)) {
+    return {
+      issue: "done_record_has_real_due_date",
+      suggestedAction: "human review before clearing real due date",
+      autoClearSafe: false
+    };
+  }
+  if (/\d{4}-\d{2}-\d{2}/.test(text) && ["done", "resolved", "superseded", "uploaded", "verified", "closed"].some((term) => lower.includes(term))) {
+    return {
+      issue: "done_record_has_due_date_status_text",
+      suggestedAction: "safe to clear Due Date text marker after review",
+      autoClearSafe: true
+    };
+  }
+  if (["when ", "ongoing", "backup", "blocked", "available", "targeted cleanup", "review only"].some((term) => lower.includes(term))) {
+    return {
+      issue: "done_record_has_due_date_placeholder_text",
+      suggestedAction: "safe to clear Due Date placeholder text after review",
+      autoClearSafe: true
+    };
+  }
+  return {
+    issue: "done_record_has_due_date_non_date_text",
+    suggestedAction: "review Due Date text before clearing",
+    autoClearSafe: false
+  };
+}
+
 function appendText(existing, text, { separator = "\n\n", includeTimestamp = true } = {}) {
   const prefix = includeTimestamp ? `[${new Date().toISOString()}] ` : "";
   const addition = `${prefix}${text}`;
@@ -225,15 +261,16 @@ async function scanTableForNoise({ base, tableName, maxRecords, maxItems }) {
     const followUpField = firstExistingField(table, ["Follow-Up Date", "Next Follow-Up", "Next Follow Up"]);
     const dueDateField = firstExistingField(table, ["Due Date"]);
     const hasStaleFollowUp = Boolean(followUpField && !isBlankValue(fields[followUpField]) && isDoneish(fields));
-    const hasStaleDueDate = Boolean(dueDateField && !isBlankValue(fields[dueDateField]) && isDoneish(fields));
+    const dueDateNoise = dueDateField && isDoneish(fields) ? classifyDueDateNoise(fields[dueDateField]) : null;
     const title = fieldText(fields, ["Task", "Name", "Title", "Document", "Metric Name", "Record ID", "Task ID"]) || record.id;
-    if (hasStaleFollowUp || hasStaleDueDate) {
+    if (hasStaleFollowUp || dueDateNoise) {
       items.push({
         tableName,
         recordId: record.id,
         title,
-        issue: hasStaleFollowUp ? "done_record_has_follow_up_date" : "done_record_has_due_date",
-        suggestedAction: hasStaleFollowUp ? `clear ${followUpField}` : `review or clear ${dueDateField}`,
+        issue: hasStaleFollowUp ? "done_record_has_follow_up_date" : dueDateNoise.issue,
+        suggestedAction: hasStaleFollowUp ? `clear ${followUpField}` : dueDateNoise.suggestedAction,
+        autoClearSafe: hasStaleFollowUp || Boolean(dueDateNoise.autoClearSafe),
         fields: {
           Status: fields.Status ?? null,
           Priority: fields.Priority ?? null,
@@ -348,12 +385,13 @@ function registerWorkflowTools(server) {
     return jsonContent({ success: true, action_attempted: "get_record_workpack", tableName, recordId: id, primary: normalizeRecord(record), linked });
   });
 
-  safeTool(server, "dry_run_noise_cleanup", "Dry-run first Command Center noise scan for stale follow-up dates on done/closed records. Apply mode only clears follow-up fields, not due dates or statuses.", {
+  safeTool(server, "dry_run_noise_cleanup", "Dry-run first Command Center noise scan for stale follow-up dates and Due Date text placeholders on done/closed records. Apply mode clears follow-up fields only unless applyDueDateTextCleanup=true.", {
     tableNames: z.array(z.string()).optional(),
     maxRecordsPerTable: z.number().int().min(1).max(100).optional(),
     maxItems: z.number().int().min(1).max(100).optional(),
-    apply: z.boolean().optional()
-  }, async ({ tableNames = ["Tasks", "Missing Documents", "Attachment Intake Queue", "Dashboard Metrics"], maxRecordsPerTable = 50, maxItems = 50, apply = false }) => {
+    apply: z.boolean().optional(),
+    applyDueDateTextCleanup: z.boolean().optional()
+  }, async ({ tableNames = ["Tasks", "Missing Documents", "Attachment Intake Queue", "Dashboard Metrics"], maxRecordsPerTable = 50, maxItems = 50, apply = false, applyDueDateTextCleanup = false }) => {
     const allItems = [];
     for (const tableName of tableNames) {
       try {
@@ -368,15 +406,19 @@ function registerWorkflowTools(server) {
     const applied = [];
     if (apply) {
       for (const item of allItems) {
-        if (item.issue !== "done_record_has_follow_up_date") continue;
-        const fieldName = Object.keys(item.fields).find((key) => key.includes("Follow") && item.fields[key]);
+        let fieldName = null;
+        if (item.issue === "done_record_has_follow_up_date") {
+          fieldName = Object.keys(item.fields).find((key) => key.includes("Follow") && item.fields[key]);
+        } else if (applyDueDateTextCleanup && item.autoClearSafe && item.issue.includes("due_date") && item.issue !== "done_record_has_real_due_date") {
+          fieldName = Object.keys(item.fields).find((key) => key === "Due Date" && item.fields[key]);
+        }
         if (!fieldName) continue;
         const [updated] = await base(item.tableName).update([{ id: item.recordId, fields: { [fieldName]: null } }]);
         applied.push({ tableName: item.tableName, recordId: item.recordId, clearedField: fieldName, data: normalizeRecord(updated) });
       }
     }
 
-    return jsonContent({ success: true, action_attempted: "dry_run_noise_cleanup", mode: apply ? "applied_limited_follow_up_clears" : "dry_run", itemCount: allItems.length, items: allItems, applied });
+    return jsonContent({ success: true, action_attempted: "dry_run_noise_cleanup", mode: apply ? "applied_limited_cleanup" : "dry_run", applyDueDateTextCleanup, itemCount: allItems.length, items: allItems, applied });
   });
 }
 
