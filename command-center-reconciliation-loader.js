@@ -50,6 +50,15 @@ const WAITING_TERMS = [
   "awaiting"
 ];
 
+const ACTIVE_STATUS_TERMS = [
+  "open",
+  "to do",
+  "active",
+  "verification pending",
+  "evidence gathering",
+  "not confirmed"
+];
+
 const SOURCE_TERMS = [
   "missing",
   "needs source",
@@ -172,6 +181,72 @@ function hasMeaningfulField(record) {
   return Object.values(record.fields || {}).some((value) => normalizeValue(value).trim().length > 0);
 }
 
+function statusText(record) {
+  return normalizeSelect(fieldValue(record.fields || {}, [
+    "Status",
+    "Run Status",
+    "Upload Status",
+    "Approval State",
+    "State",
+    "Priority",
+    "Current Status"
+  ]));
+}
+
+function itemForCategory(tableName, record, category, source = "explicit_status") {
+  const sourceSuffix = source === "explicit_status" ? " Explicit status was prioritized over older note text." : "";
+  const definitions = {
+    "Ready to execute": {
+      reason: `Record appears ready for a low-risk prepared action.${sourceSuffix}`,
+      proposedAction: "Review the proposed action and execute only if it stays inside the low-risk boundary.",
+      allowedExecutionLevel: "low_risk_write"
+    },
+    "Waiting external": {
+      reason: `Record appears to be waiting on a reply, approval, provider response, or user-handled step.${sourceSuffix}`,
+      proposedAction: "Keep in waiting queue; follow up only when the waiting interval has elapsed.",
+      allowedExecutionLevel: "read_only"
+    },
+    "Needs source": {
+      reason: `Record indicates a missing or unverified source document/evidence item.${sourceSuffix}`,
+      proposedAction: "Search Gmail, Drive, and uploaded files for the source before changing the operational state.",
+      riskFlags: ["source_not_verified"],
+      allowedExecutionLevel: "read_only"
+    },
+    "Needs review": {
+      reason: `Record is active or ambiguous and needs human-facing triage before automation.${sourceSuffix}`,
+      proposedAction: "Classify the operational state, attach missing evidence if available, and update the status only after verification.",
+      allowedExecutionLevel: "human_review"
+    },
+    "Done / do not repeat": {
+      reason: `Record language indicates the work is complete, verified, accepted, uploaded, or closed.${sourceSuffix}`,
+      proposedAction: "Leave as reference material and skip future reminders unless a new source changes the state.",
+      allowedExecutionLevel: "none"
+    },
+    "Superseded": {
+      reason: `Record appears to be superseded, backup-only, or a legacy pointer.${sourceSuffix}`,
+      proposedAction: "Keep for retrieval if useful, but hide from default operational cockpit and avoid repeating completed work.",
+      allowedExecutionLevel: "read_only"
+    }
+  };
+  return buildItem({ tableName, record, category, ...definitions[category] });
+}
+
+function explicitStatusCategory(tableName, record) {
+  const status = statusText(record);
+  if (!status) return null;
+
+  if (hasAny(status, SUPERSEDED_TERMS)) return "Superseded";
+  if (hasAny(status, WAITING_TERMS)) return "Waiting external";
+  if (hasAny(status, SOURCE_TERMS)) return "Needs source";
+
+  if (hasAny(status, ACTIVE_STATUS_TERMS)) {
+    return tableName === "Command Center Waiting Replies" ? "Waiting external" : "Needs review";
+  }
+
+  if (hasAny(status, DONE_TERMS)) return "Done / do not repeat";
+  return null;
+}
+
 function buildItem({ tableName, record, category, reason, proposedAction, riskFlags = [], allowedExecutionLevel = "read_only" }) {
   const fields = record.fields || {};
   const status = fieldText(fields, [
@@ -229,26 +304,31 @@ function classifyRecord(tableName, record) {
     return buildItem({ tableName, record, category: "Superseded", reason: "Record has no meaningful field values and is cleanup noise.", proposedAction: "Let the hygiene scan handle blank-row cleanup in dry-run first.", allowedExecutionLevel: "hygiene_review" });
   }
 
+  const statusCategory = explicitStatusCategory(tableName, record);
+  if (statusCategory) {
+    return itemForCategory(tableName, record, statusCategory);
+  }
+
   const haystack = recordHaystack(record);
 
   if (hasAny(haystack, SUPERSEDED_TERMS)) {
-    return buildItem({ tableName, record, category: "Superseded", reason: "Record appears to be superseded, backup-only, or a legacy pointer.", proposedAction: "Keep for retrieval if useful, but hide from default operational cockpit and avoid repeating completed work.", allowedExecutionLevel: "read_only" });
+    return itemForCategory(tableName, record, "Superseded", "record_text");
   }
 
-  if (hasAny(haystack, DONE_TERMS)) {
-    return buildItem({ tableName, record, category: "Done / do not repeat", reason: "Record language indicates the work is complete, verified, accepted, uploaded, or closed.", proposedAction: "Leave as reference material and skip future reminders unless a new source changes the state.", allowedExecutionLevel: "none" });
+  if (hasAny(haystack, WAITING_TERMS)) {
+    return itemForCategory(tableName, record, "Waiting external", "record_text");
+  }
+
+  if (hasAny(haystack, SOURCE_TERMS)) {
+    return itemForCategory(tableName, record, "Needs source", "record_text");
   }
 
   if (hasAny(haystack, REVIEW_TERMS)) {
     return buildItem({ tableName, record, category: "Needs review", reason: "Record contains legal, coverage, payment, deletion, merge, unknown, or human-review language.", proposedAction: "Prepare a review packet before any write or outbound communication.", riskFlags: ["consequential_or_ambiguous_state"], allowedExecutionLevel: "human_review" });
   }
 
-  if (hasAny(haystack, SOURCE_TERMS)) {
-    return buildItem({ tableName, record, category: "Needs source", reason: "Record indicates a missing or unverified source document/evidence item.", proposedAction: "Search Gmail, Drive, and uploaded files for the source before changing the operational state.", riskFlags: ["source_not_verified"], allowedExecutionLevel: "read_only" });
-  }
-
-  if (hasAny(haystack, WAITING_TERMS)) {
-    return buildItem({ tableName, record, category: "Waiting external", reason: "Record appears to be waiting on a reply, approval, provider response, or user-handled step.", proposedAction: "Keep in waiting queue; follow up only when the waiting interval has elapsed.", allowedExecutionLevel: "read_only" });
+  if (hasAny(haystack, DONE_TERMS)) {
+    return itemForCategory(tableName, record, "Done / do not repeat", "record_text");
   }
 
   if (tableName === "Tasks") {
