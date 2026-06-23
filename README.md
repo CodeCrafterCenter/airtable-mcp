@@ -15,6 +15,7 @@ A Model Context Protocol (MCP) server for Airtable, designed to run on Railway.
 - **Idempotent upsert** — `batch_upsert_records` creates records without a `recordId` and updates those that have one, making it safe to call repeatedly.
 - **Command Center hygiene tools** — clean Contracts feeds hide legacy evidence pointers, and daily hygiene scans can detect clutter, normalize obvious evidence placeholders, and delete only fully blank rows when explicitly applied.
 - **Command Center reconciliation tools** — daily scans can now generate a dry-run operating queue across Airtable tables and a cockpit-ready payload for the future web app.
+- **Command Center workbench tools** — Today Queue and Action Pack tools rank operational work, explain why an item matters, list safe available actions, and preserve human-review gates for consequential decisions.
 - **Schema writes disabled by default** — `create_table`, `create_field`, and `update_field` require `ENABLE_SCHEMA_WRITES=true`.
 - **Comments disabled by default** — `list_record_comments` and `create_record_comment` require `ENABLE_COMMENTS=true`.
 
@@ -107,6 +108,14 @@ Reconciliation is intentionally conservative. It can auto-surface stale/noisy/do
 
 Starting in v6.4.8, reconciliation prioritizes explicit status fields before broad record text. This keeps active `Open`, `Waiting reply`, `Follow-up sent`, and similar records from being incorrectly buried in Done because an older note contains words like `closed`, `verified`, or `received`, while avoiding broad `active` matches that can misread phrases like `not actively chased`.
 
+### Command Center Workbench
+| Tool | Description |
+|---|---|
+| `get_command_center_today_queue` | Return a ranked read-only Today Queue / Action Workbench across operational Airtable tables, including priority score, why the item matters, recommended next action, safe available actions, source hints, and human-review boundary. |
+| `prepare_command_center_action_pack` | Prepare a read-only action pack for one record with compact facts, risk flags, source hints, safe actions, blocked actions, and audit guidance. |
+
+Workbench tools are read-only and prepare-only. They make the queue easier to act on, but they do not alter legal, coverage, payment, claim, contract, cancellation, attachment, or outbound-message state. Execution should continue through approved write tools such as `append_operational_note`, `update_record_json`, uploader tools, or Gmail drafting after human review where required.
+
 ### Comments _(requires `ENABLE_COMMENTS=true`)_
 | Tool | Description |
 |---|---|
@@ -130,6 +139,7 @@ Returns `{ ok: true, version, schemaCacheAgeMs, capabilities }`.
 
 ## Deployment Notes
 
+- 2026-06-23: Added Command Center Workbench v6.5.0 with `get_command_center_today_queue` and `prepare_command_center_action_pack` for ranked daily triage and read-only action preparation.
 - 2026-06-23: Tightened reconciliation classifier v6.4.8 so explicit current status fields take priority over stale note text, reducing false Done classifications for Open, Waiting reply, Follow-up sent, and active review items without overmatching generic `active` wording.
 - 2026-06-23: Added `create_audit_run`, `mark_record_resolved`, `append_operational_note`, `get_record_workpack`, and `dry_run_noise_cleanup` v6.4.4 for workflow execution, auditability, pre-action context, and noise reduction.
 - 2026-06-23: Added `update_record_json`, `batch_update_records_json`, and `append_text_field` v6.4.3 to reduce client schema coercion problems and safer note appends; added metadata patch loader so app-facing version responses stop showing stale `6.3.0`.
