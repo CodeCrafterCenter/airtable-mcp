@@ -266,10 +266,10 @@ function registerWorkflowTools(server) {
     const table = await getTableOrThrow(tableName);
     const fields = {};
     const resolvedRunIdField = runIdFieldName || firstExistingField(table, ["Run ID", "Action Run ID", "Name", "Title"]);
-    const resolvedSummaryField = summaryFieldName || firstExistingField(table, ["Summary", "Action Summary", "Notes", "Details"]);
-    const resolvedStatusField = statusFieldName || firstExistingField(table, ["Status", "Result", "Outcome"]);
-    const resolvedDetailsField = detailsFieldName || firstExistingField(table, ["Details", "Notes", "Description", "Output"]);
-    const resolvedDateField = dateFieldName || firstExistingField(table, ["Date", "Run Date", "Created Date", "Last Checked"]);
+    const resolvedSummaryField = summaryFieldName || firstExistingField(table, ["Summary", "Action Summary", "Airtable Update Log", "Notes", "Details"]);
+    const resolvedStatusField = statusFieldName || firstExistingField(table, ["Run Status", "Status", "Result", "Outcome"]);
+    const resolvedDetailsField = detailsFieldName || firstExistingField(table, ["Context Snapshot", "Details", "Airtable Update Log", "Notes", "Description", "Output"]);
+    const resolvedDateField = dateFieldName || firstExistingField(table, ["Run Date", "Date", "Created Date", "Last Checked"]);
 
     if (resolvedRunIdField) fields[resolvedRunIdField] = runId;
     if (resolvedSummaryField) fields[resolvedSummaryField] = summary;
