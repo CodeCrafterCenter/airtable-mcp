@@ -53,7 +53,6 @@ const WAITING_TERMS = [
 const ACTIVE_STATUS_TERMS = [
   "open",
   "to do",
-  "active",
   "verification pending",
   "evidence gathering",
   "not confirmed"
@@ -238,12 +237,12 @@ function explicitStatusCategory(tableName, record) {
   if (hasAny(status, SUPERSEDED_TERMS)) return "Superseded";
   if (hasAny(status, WAITING_TERMS)) return "Waiting external";
   if (hasAny(status, SOURCE_TERMS)) return "Needs source";
+  if (hasAny(status, DONE_TERMS)) return "Done / do not repeat";
 
   if (hasAny(status, ACTIVE_STATUS_TERMS)) {
     return tableName === "Command Center Waiting Replies" ? "Waiting external" : "Needs review";
   }
 
-  if (hasAny(status, DONE_TERMS)) return "Done / do not repeat";
   return null;
 }
 
