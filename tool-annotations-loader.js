@@ -13,7 +13,8 @@ const READ_ONLY_TOOLS = new Set([
   "resolve_record",
   "search_records",
   "find_records_across_tables",
-  "list_record_comments"
+  "list_record_comments",
+  "get_record_workpack"
 ]);
 
 function annotationsForTool(name) {
@@ -28,8 +29,8 @@ function annotationsForTool(name) {
 
   return {
     readOnlyHint: false,
-    destructiveHint: name.includes("delete") || name.includes("clear") || name === "attach_file_to_record",
-    idempotentHint: name.includes("update") || name.includes("upsert") || name.includes("clear"),
+    destructiveHint: name.includes("delete") || name.includes("clear") || name.includes("cleanup") || name === "attach_file_to_record",
+    idempotentHint: name.includes("update") || name.includes("upsert") || name.includes("clear") || name.includes("cleanup"),
     openWorldHint: true
   };
 }
