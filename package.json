@@ -1,11 +1,11 @@
 {
   "name": "airtable-mcp",
-  "version": "6.4.3",
+  "version": "6.4.4",
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node --import ./uploader-security-loader.js --import ./tool-annotations-loader.js --import ./version-metadata-loader.js --import ./uploader-url-loader.js --import ./command-center-hygiene-loader.js --import ./command-center-reconciliation-loader.js --import ./command-center-clear-fields-loader.js --import ./command-center-ops-utilities-loader.js server.js",
-    "check": "node --check server.js && node --check tool-annotations-loader.js && node --check version-metadata-loader.js && node --check uploader-security-loader.js && node --check uploader-url-loader.js && node --check command-center-hygiene-loader.js && node --check command-center-reconciliation-loader.js && node --check command-center-clear-fields-loader.js && node --check command-center-ops-utilities-loader.js"
+    "start": "node --import ./uploader-security-loader.js --import ./tool-annotations-loader.js --import ./version-metadata-loader.js --import ./uploader-url-loader.js --import ./command-center-hygiene-loader.js --import ./command-center-reconciliation-loader.js --import ./command-center-clear-fields-loader.js --import ./command-center-ops-utilities-loader.js --import ./command-center-workflow-tools-loader.js server.js",
+    "check": "node --check server.js && node --check tool-annotations-loader.js && node --check version-metadata-loader.js && node --check uploader-security-loader.js && node --check uploader-url-loader.js && node --check command-center-hygiene-loader.js && node --check command-center-reconciliation-loader.js && node --check command-center-clear-fields-loader.js && node --check command-center-ops-utilities-loader.js && node --check command-center-workflow-tools-loader.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
